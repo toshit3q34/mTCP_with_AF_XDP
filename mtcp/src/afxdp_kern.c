@@ -23,7 +23,10 @@
  *     the third-arg flag to bpf_redirect_map below.
  */
 
-#include "vmlinux.h"
+#include <linux/bpf.h>
+#include <linux/if_ether.h>
+#include <linux/ip.h>
+#include <linux/tcp.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
 
