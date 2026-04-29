@@ -95,7 +95,8 @@ int xdp_sock_prog(struct xdp_md *ctx)
      *    inserts to the matching slot. */
     __u32 index = ctx->ingress_ifindex;
     if (bpf_map_lookup_elem(&xsks_map, &index)){
-		bpf_trace_printk("The index to search is : %d\n", index);
+		char fmt[] = "The index to search is : %d\n";
+    	bpf_trace_printk(fmt, sizeof(fmt), index);
         return bpf_redirect_map(&xsks_map, index, XDP_PASS);
 	}
 
