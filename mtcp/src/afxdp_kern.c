@@ -30,13 +30,12 @@
 #define ETH_P_IP   0x0800
 #define ETH_P_ARP  0x0806
 
-struct {
-    __uint(type, BPF_MAP_TYPE_XSKMAP);
-    __uint(max_entries, 64);
-    __uint(key_size, sizeof(__u32));
-    __uint(value_size, sizeof(__u32));
-    __uint(pinning, LIBBPF_PIN_BY_NAME);
-} xsks_map SEC(".maps");
+struct bpf_map_def SEC("maps") xsks_map = {
+    .type = BPF_MAP_TYPE_XSKMAP,
+    .key_size = sizeof(__u32),
+    .value_size = sizeof(__u32),
+    .max_entries = 64,
+};
 
 SEC("xdp")
 int xdp_sock_prog(struct xdp_md *ctx)
