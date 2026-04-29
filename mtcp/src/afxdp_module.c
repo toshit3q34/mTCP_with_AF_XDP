@@ -254,11 +254,16 @@ void afxdp_load_module(void){
 	}
 
 	/* We also need to load the xsks_map */
-	map = bpf_object__find_map_by_name(xdp_program__bpf_obj(prog), "xsks_map");
+	map = xdp_program__find_map(prog, "xsks_map");
+	if (!map) {
+		fprintf(stderr, "ERROR: no xsks map found\n");
+		exit(EXIT_FAILURE);
+	}
+
 	xsk_map_fd = bpf_map__fd(map);
 	if (xsk_map_fd < 0) {
-		fprintf(stderr, "ERROR: no xsks map found: %s\n",
-			strerror(xsk_map_fd));
+		fprintf(stderr, "ERROR: xsks map fd invalid: %s\n",
+			strerror(errno));
 		exit(EXIT_FAILURE);
 	}
 }
