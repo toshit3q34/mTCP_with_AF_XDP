@@ -24,11 +24,13 @@
 /* for ioctl */
 #include <sys/ioctl.h>
 
-/* for libbpf/libxdp/AF_XDP */
+/* for libbpf / AF_XDP. We use libbpf-only APIs (no libxdp dependency)
+ * because Ubuntu 22.04 ships libbpf-dev but not libxdp-dev. */
 #include <bpf/bpf.h>
+/* for XDP_FLAGS_* constants (DRV_MODE, SKB_MODE, UPDATE_IF_NOEXIST) */
+#include <linux/if_link.h>
 #include <bpf/libbpf.h>
-#include <xdp/libxdp.h>
-#include <xdp/xsk.h>
+#include <bpf/xsk.h>
 /* for logging */
 #include "debug.h"
 /* for num_devices_* */
