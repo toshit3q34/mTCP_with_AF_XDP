@@ -599,6 +599,7 @@ uint8_t * afxdp_get_rptr(struct mtcp_thread_context *ctxt, int ifidx, int index,
 }
 
 int32_t afxdp_recv_pkts(struct mtcp_thread_context *ctxt, int ifidx){
+	fprintf(stderr, "AFXDP: Want to receive packets\n");
 	struct xsk_socket_info *xsk_info = (struct xsk_socket_info *)ctxt->io_private_context;
 	struct xsk_if_socket *xsk_if;
 	uint32_t idx_rx = 0, idx_fq = 0;
