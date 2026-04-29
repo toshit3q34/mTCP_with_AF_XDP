@@ -481,8 +481,9 @@ void afxdp_init_handle(struct mtcp_thread_context *ctxt){
 		if (ifname == NULL || ifname[0] == '\0')
 			continue;
 
+		uint32_t qid = (uint32_t)ctxt->cpu;
 		if (xsk_configure_socket(xsk_info, ifidx, ifname,
-					 (uint32_t)ctxt->cpu, kifindex,
+					 qid, kifindex,
 					 first_on_umem) != 0) {
 			fprintf(stderr, "ERROR: Can't setup AF_XDP socket on iface '%s' q=%d: \"%s\"\n",
 				ifname, ctxt->cpu, strerror(errno));
@@ -490,11 +491,8 @@ void afxdp_init_handle(struct mtcp_thread_context *ctxt){
 		}
 
 		fprintf(stderr,
-			"AFXDP: cpu=%d bound xsk on iface '%s' (eidx=%d) queue_id=%u "
-			"first_on_umem=%d -> xsks_map[ifindex=%d] = xsk_fd=%d\n",
-			ctxt->cpu, ifname, ifidx, (uint32_t)ctxt->cpu,
-			first_on_umem ? 1 : 0, kifindex,
-			xsk_socket__fd(xsk_info->sock[ifidx].xsk));
+            "AFXDP: cpu=%d bound xsk on iface '%s' queue_id=%u -> xsks_map[key=%u]\n",
+            ctxt->cpu, ifname, qid, qid);
 
 		first_on_umem = false;
 	}
