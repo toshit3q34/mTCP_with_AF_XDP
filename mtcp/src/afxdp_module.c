@@ -221,7 +221,7 @@ void afxdp_load_module(void){
 
 		/* Try SKB mode directly (best for mlx4_en) */
 		err = xdp_program__attach(prog, ifindex,
-								XDP_FLAGS_SKB_MODE,
+								XDP_MODE_SKB,
 								XDP_FLAGS_UPDATE_IF_NOEXIST);
 
 		if (err) {
