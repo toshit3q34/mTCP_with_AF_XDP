@@ -29,8 +29,9 @@
 #include <bpf/bpf.h>
 /* for XDP_FLAGS_* constants (DRV_MODE, SKB_MODE, UPDATE_IF_NOEXIST) */
 #include <linux/if_link.h>
-#include <bpf/libbpf.h>
-#include <bpf/xsk.h>
+#include <xdp/libxdp.h>
+#include <xdp/xdp_helpers.h>
+#include <xdp/xsk.h>
 /* for logging */
 #include "debug.h"
 /* for num_devices_* */
