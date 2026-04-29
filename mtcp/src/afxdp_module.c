@@ -227,7 +227,7 @@ void afxdp_load_module(void){
 		if(ifindex != 3){
 			continue;
 		}
-
+		printf("HERE\n");
 		attached_mode[ifidx] = 0;
 
 		if (ifindex <= 0)
