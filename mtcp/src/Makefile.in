@@ -42,12 +42,7 @@ endif
 # DBGCERR     	= Enable macro to print error statements
 #
 
-GCC_OPT += -Wall -fPIC -fgnu89-inline -Werror \
-           -Wno-error=unused-variable \
-           -Wno-error=unused-but-set-variable \
-           -Wno-error=stringop-truncation \
-           -Wno-error=address-of-packed-member \
-           -Wno-error=cast-function-type
+GCC_OPT += -Wall -fPIC -fgnu89-inline -w
 #DBG_OPT = -DDBGMSG -DDBGFUNC -DSTREAM -DSTATE -DTSTAT -DAPP -DEPOLL
 #DBG_OPT = -DDBGMSG -DDBGFUNC -DSTREAM -DSTATE
 #DBG_OPT += -DPKTDUMP
