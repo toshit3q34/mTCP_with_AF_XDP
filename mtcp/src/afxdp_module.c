@@ -193,6 +193,14 @@ void afxdp_load_module(void){
 		exit(EXIT_FAILURE);
 	}
 
+	struct bpf_object *obj = xdp_program__bpf_obj(prog);
+    err = bpf_object__load(obj);
+    if (err) {
+        fprintf(stderr, "ERROR: Kernel rejected BPF object: %s\n", strerror(-err));
+        /* Hint: If this fails, run 'sudo dmesg' to see the verifier log */
+        exit(EXIT_FAILURE);
+    }
+
 	/* Attach the program on all configured interfaces. Try native (driver)
 	 * mode first for best performance; fall back to SKB (generic) mode if
 	 * the driver doesn't support native XDP. Bail hard if both fail —
@@ -245,9 +253,6 @@ void afxdp_load_module(void){
 			}
 		}
 	}
-
-	/* We also need to load the xsks_map */
-	struct bpf_object *obj = xdp_program__bpf_obj(prog);
     
     // Use the more efficient find_map_by_name instead of a manual loop
     struct bpf_map *map = bpf_object__find_map_by_name(obj, "xsks_map");
