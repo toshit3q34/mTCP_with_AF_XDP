@@ -193,6 +193,13 @@ void afxdp_load_module(void){
 		exit(EXIT_FAILURE);
 	}
 
+	// Force load too
+	err = xdp_program__load(prog); if (err) { 
+		libxdp_strerror(err, errmsg, sizeof(errmsg)); 
+		fprintf(stderr, "ERROR: loading XDP program into kernel: %s (%d)\n", errmsg, err); 
+		exit(EXIT_FAILURE); 
+	}
+
 	if (num_devices_attached > MAX_DEVICES) {
 		fprintf(stderr, "ERROR: num_devices_attached (%d) exceeds MAX_DEVICES (%d)\n",
 			num_devices_attached, MAX_DEVICES);
