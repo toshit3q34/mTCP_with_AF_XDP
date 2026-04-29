@@ -6,12 +6,12 @@
 #define LOG_BUFF_SIZE (256*1024)
 #define NUM_LOG_BUFF (100)
 
-enum {
+enum log_state{
 	IDLE_LOGT,
 	ACTIVE_LOGT
 };
 
-extern int log_thread_state;
+extern enum log_state log_thread_state;
 
 typedef struct log_buff
 {
