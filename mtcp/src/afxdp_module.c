@@ -180,7 +180,6 @@ static inline void complete_tx(struct xsk_socket_info *xsk)
 void afxdp_load_module(void){
 	const char *kern_path = afxdp_resolve_kern_path();
 	DECLARE_LIBXDP_OPTS(xdp_program_opts, xdp_opts, .open_filename = kern_path,);
-	struct bpf_map *map;
 	custom_xsk = true;
 
 	prog = xdp_program__create(&xdp_opts);
@@ -254,7 +253,15 @@ void afxdp_load_module(void){
 	}
 
 	/* We also need to load the xsks_map */
-	map = xdp_program__find_map(prog, "xsks_map");
+	struct bpf_object *obj = xdp_program__bpf_obj(prog);
+	struct bpf_map *map = NULL;
+
+	bpf_object__for_each_map(map, obj) {
+		const char *name = bpf_map__name(map);
+		if (name && strcmp(name, "xsks_map") == 0)
+			break;
+	}
+
 	if (!map) {
 		fprintf(stderr, "ERROR: no xsks map found\n");
 		exit(EXIT_FAILURE);
@@ -262,8 +269,7 @@ void afxdp_load_module(void){
 
 	xsk_map_fd = bpf_map__fd(map);
 	if (xsk_map_fd < 0) {
-		fprintf(stderr, "ERROR: xsks map fd invalid: %s\n",
-			strerror(errno));
+		perror("ERROR: xsks_map fd");
 		exit(EXIT_FAILURE);
 	}
 }
