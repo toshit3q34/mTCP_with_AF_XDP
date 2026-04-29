@@ -35,7 +35,7 @@ struct {
     __uint(max_entries, 64);
     __uint(key_size, sizeof(__u32));
     __uint(value_size, sizeof(__u32));
-    // __uint(pinning, LIBBPF_PIN_BY_NAME);
+    __uint(pinning, LIBBPF_PIN_BY_NAME);
 } xsks_map SEC(".maps");
 
 SEC("xdp")
