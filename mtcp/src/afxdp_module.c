@@ -232,7 +232,7 @@ void afxdp_load_module(void){
 			exit(EXIT_FAILURE);
 		}
 
-		attached_mode[ifidx] = XDP_FLAGS_SKB_MODE;
+		attached_mode[ifidx] = XDP_MODE_SKB;
 
 		/* Promiscuous mode */
 		if (ifname && ifname[0] != '\0') {
