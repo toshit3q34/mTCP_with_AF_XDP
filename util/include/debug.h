@@ -53,7 +53,7 @@
 #ifdef APP
 #define TRACE_APP(f, m...) TRACE_FUNC("APP", f, ##m)
 #else
-#define TRACE_APP(f, m...) fprintf(stderr, f, ##m)
+#define TRACE_APP(f, m...) fprintf(stdout, f, ##m)
 #endif
 
 #ifdef DBGFUNC
