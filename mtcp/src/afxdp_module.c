@@ -224,6 +224,9 @@ void afxdp_load_module(void){
 	for (int ifidx = 0; ifidx < num_devices_attached; ifidx++) {
 		const int ifindex  = devices_attached[ifidx];
 		const char *ifname = CONFIG.eths[ifidx].dev_name;
+		if(ifname != "eno1d1"){
+			continue;
+		}
 
 		attached_mode[ifidx] = 0;
 
@@ -368,7 +371,7 @@ static int xsk_configure_socket(struct xsk_socket_info *xsk_info, int ifidx,
 		 * when each NIC has only one queue. We key the map by kernel
 		 * ifindex instead, matching what afxdp_kern.c looks up via
 		 * ctx->ingress_ifindex. */
-		__u32 key = (__u32)kernel_ifindex;
+		__u32 key = (__u32)queue_id;
 		int xsk_fd = xsk_socket__fd(xsk_if->xsk);
 		ret = bpf_map_update_elem(xsk_map_fd, &key, &xsk_fd, BPF_ANY);
 		if (ret) {
@@ -471,6 +474,9 @@ void afxdp_init_handle(struct mtcp_thread_context *ctxt){
 	bool first_on_umem = true;
 	for (int ifidx = 0; ifidx < num_devices_attached; ifidx++) {
 		const char *ifname = CONFIG.eths[ifidx].dev_name;
+		if(ifname != "eno1d1"){
+			continue;
+		}
 		const int kifindex = devices_attached[ifidx];
 		if (ifname == NULL || ifname[0] == '\0')
 			continue;

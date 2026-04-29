@@ -99,9 +99,8 @@ int xdp_sock_prog(struct xdp_md *ctx)
      *    bound to a different netdev. With this scheme each NIC's
      *    socket lives at xsks_map[kernel_ifindex] and userspace
      *    inserts to the matching slot. */
-    __u32 index = ctx->ingress_ifindex;
+    __u32 index = ctx->rx_queue_index;
     if (bpf_map_lookup_elem(&xsks_map, &index)){
-		char fmt[] = "The index to search is : %d\n";
     	BPF_PRINTK("Interface index: %d\n", index);
         return bpf_redirect_map(&xsks_map, index, XDP_PASS);
 	}
