@@ -224,9 +224,6 @@ void afxdp_load_module(void){
 	for (int ifidx = 0; ifidx < num_devices_attached; ifidx++) {
 		const int ifindex  = devices_attached[ifidx];
 		const char *ifname = CONFIG.eths[ifidx].dev_name;
-		if(ifname != "eno1"){
-			continue;
-		}
 
 		attached_mode[ifidx] = 0;
 
