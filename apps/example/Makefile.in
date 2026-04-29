@@ -26,13 +26,13 @@ UTIL_OBJ = ${UTIL_FLD}/http_parsing.o ${UTIL_FLD}/tdate_parse.o ${UTIL_FLD}/netl
 
 # util library and header
 INC = -I./include/ ${UTIL_INC} ${MTCP_INC} -I${UTIL_FLD}/include
-LIBS = ${MTCP_LIB}
+LIBS = ${MTCP_LIB} -lmtcp -lpthread -lrt -lnuma -lxdp -lbpf -lelf -lz
 
 # psio-specific variables
 ifeq ($(PS),1)
 PS_DIR = ../../io_engine/
 PS_INC = ${PS_DIR}/include
-INC += -I{PS_INC}
+INC += -I${PS_INC}
 LIBS += -lmtcp -L${PS_DIR}/lib -lps -lpthread -lnuma -lrt
 endif
 
@@ -84,15 +84,15 @@ epserver.o: epserver.c
 
 epserver: epserver.o ${MTCP_FLD}/lib/libmtcp.a
 	$(MSG) "   LD $<"
-	$(HIDE) ${CC} $< ${MTCP_FLD}/lib/libmtcp.a ${LIBS} ${UTIL_OBJ} -o $@
+	$(HIDE) $(CC) $< ${UTIL_OBJ} ${MTCP_FLD}/lib/libmtcp.a ${LIBS} -o $@
 
 epwget.o: epwget.c
 	$(MSG) "   CC $<"
 	$(HIDE) ${CC} -c $< ${CFLAGS} ${INC}
 
-epwget: epwget.o ${MTCP_FLD}/lib/libmtcp.a
-	$(MSG) "   LD $<"
-	$(HIDE) ${CC} $< ${MTCP_FLD}/lib/libmtcp.a ${LIBS} ${UTIL_OBJ} -o $@
+epwget: epwget.o ${MTCP_FLD}/lib/libmtcp.a 
+	$(MSG) " LD $<" 
+	$(HIDE) $(CC) $< ${UTIL_OBJ} ${MTCP_FLD}/lib/libmtcp.a ${LIBS} -o $@
 
 clean:
 	$(MSG) "   CLEAN $(TARGETS)"
