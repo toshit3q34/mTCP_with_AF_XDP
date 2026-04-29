@@ -431,6 +431,7 @@ RunServerThread(void *arg)
 	}
 	mctx = ctx->mctx;
 	ep = ctx->ep;
+	printf("I AM HERE :D");
 
 	events = (struct mtcp_epoll_event *)
 			calloc(MAX_EVENTS, sizeof(struct mtcp_epoll_event));
