@@ -367,6 +367,8 @@ static int xsk_configure_socket(struct xsk_socket_info *xsk_info, int ifidx,
 			goto error_exit;
 	}
 
+	fprintf(stderr, "AFXDP: Socket created.\n");
+
 	return 0;
 
 error_exit:
