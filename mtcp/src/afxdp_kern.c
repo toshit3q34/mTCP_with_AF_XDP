@@ -34,6 +34,12 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
 
+#define BPF_PRINTK(fmt, ...)                            \
+({                                                      \
+    char f[] = fmt;                                     \
+    bpf_trace_printk(f, sizeof(f), ##__VA_ARGS__);      \
+})
+
 #define ETH_P_IP   0x0800
 #define ETH_P_ARP  0x0806
 
@@ -96,7 +102,7 @@ int xdp_sock_prog(struct xdp_md *ctx)
     __u32 index = ctx->ingress_ifindex;
     if (bpf_map_lookup_elem(&xsks_map, &index)){
 		char fmt[] = "The index to search is : %d\n";
-    	bpf_trace_printk(fmt, sizeof(fmt), index);
+    	BPF_PRINTK("Interface index: %d\n", index);
         return bpf_redirect_map(&xsks_map, index, XDP_PASS);
 	}
 
