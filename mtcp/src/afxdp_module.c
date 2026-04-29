@@ -214,42 +214,32 @@ void afxdp_load_module(void){
 		const int ifindex  = devices_attached[ifidx];
 		const char *ifname = CONFIG.eths[ifidx].dev_name;
 
-		attached_mode[ifidx] = XDP_MODE_UNSPEC;
+		attached_mode[ifidx] = 0;
 
 		if (ifindex <= 0)
 			continue;
 
-		err = xdp_program__attach(prog, ifindex, 0,
-					  XDP_FLAGS_UPDATE_IF_NOEXIST);
-		if (!err) {
-			attached_mode[ifidx] = XDP_MODE_NATIVE;
-		} else {
+		/* Try SKB mode directly (best for mlx4_en) */
+		err = xdp_program__attach(prog, ifindex,
+								XDP_FLAGS_SKB_MODE,
+								XDP_FLAGS_UPDATE_IF_NOEXIST);
+
+		if (err) {
 			libxdp_strerror(err, errmsg, sizeof(errmsg));
 			fprintf(stderr,
-				"Native-mode XDP attach failed on iface '%s' (ifindex=%d): %s (%d). "
-				"Falling back to SKB mode.\n",
+				"XDP attach failed on iface '%s' (ifindex=%d): %s (%d)\n",
 				ifname ? ifname : "?", ifindex, errmsg, err);
-
-			err = xdp_program__attach(prog, ifindex, XDP_MODE_SKB,
-						  XDP_FLAGS_UPDATE_IF_NOEXIST);
-			if (err) {
-				libxdp_strerror(err, errmsg, sizeof(errmsg));
-				fprintf(stderr,
-					"SKB-mode XDP attach also failed on iface '%s' (ifindex=%d): %s (%d)\n",
-					ifname ? ifname : "?", ifindex, errmsg, err);
-				exit(EXIT_FAILURE);
-			}
-			attached_mode[ifidx] = XDP_MODE_SKB;
+			exit(EXIT_FAILURE);
 		}
 
-		/* Put the iface in promiscuous mode so we receive everything,
-		 * not only frames addressed to the iface MAC. */
+		attached_mode[ifidx] = XDP_FLAGS_SKB_MODE;
+
+		/* Promiscuous mode */
 		if (ifname && ifname[0] != '\0') {
 			if (afxdp_set_promisc(ifname) < 0) {
 				fprintf(stderr,
 					"WARN: couldn't enable promisc on '%s': %s\n",
 					ifname, strerror(errno));
-				/* non-fatal: mTCP may still work for unicast traffic */
 			}
 		}
 	}
