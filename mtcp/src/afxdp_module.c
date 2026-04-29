@@ -220,9 +220,9 @@ void afxdp_load_module(void){
 			continue;
 
 		/* Try SKB mode directly (best for mlx4_en) */
-		err = xdp_program__attach(prog, ifindex,
-								XDP_MODE_SKB,
-								XDP_FLAGS_UPDATE_IF_NOEXIST);
+		err = bpf_xdp_attach(ifindex, prog,
+								XDP_FLAGS_SKB_MODE,
+								NULL);
 
 		if (err) {
 			libxdp_strerror(err, errmsg, sizeof(errmsg));
@@ -232,7 +232,7 @@ void afxdp_load_module(void){
 			exit(EXIT_FAILURE);
 		}
 
-		attached_mode[ifidx] = XDP_MODE_SKB;
+		attached_mode[ifidx] = XDP_FLAGS_SKB_MODE;
 
 		/* Promiscuous mode */
 		if (ifname && ifname[0] != '\0') {
