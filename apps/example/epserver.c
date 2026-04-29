@@ -156,10 +156,10 @@ SendUntilAvailable(struct thread_context *ctx, int sockid, struct server_vars *s
 		ret = mtcp_write(ctx->mctx, sockid,  
 				fcache[sv->fidx].file + sv->total_sent, len);
 		if (ret < 0) {
-			TRACE_APP("Connection closed with client.\n");
+			printf("Connection closed with client.\n");
 			break;
 		}
-		TRACE_APP("Socket %d: mtcp_write try: %d, ret: %d\n", sockid, len, ret);
+		printf("Socket %d: mtcp_write try: %d, ret: %d\n", sockid, len, ret);
 		sent += ret;
 		sv->total_sent += ret;
 	}
@@ -222,9 +222,9 @@ HandleReadEvent(struct thread_context *ctx, int sockid, struct server_vars *sv)
 	}
 
 	http_get_url(sv->request, sv->request_len, url, URL_LEN);
-	TRACE_APP("Socket %d URL: %s\n", sockid, url);
+	printf("Socket %d URL: %s\n", sockid, url);
 	sprintf(sv->fname, "%s%s", www_main, url);
-	TRACE_APP("Socket %d File name: %s\n", sockid, sv->fname);
+	printf("Socket %d File name: %s\n", sockid, sv->fname);
 
 	sv->keep_alive = FALSE;
 	if (http_header_str_val(sv->request, "Connection: ", 
@@ -246,7 +246,7 @@ HandleReadEvent(struct thread_context *ctx, int sockid, struct server_vars *sv)
 			break;
 		}
 	}
-	TRACE_APP("Socket %d File size: %ld (%ldMB)\n", 
+	printf("Socket %d File size: %ld (%ldMB)\n", 
 			sockid, sv->fsize, sv->fsize / 1024 / 1024);
 
 	/* Response header handling */
@@ -264,9 +264,9 @@ HandleReadEvent(struct thread_context *ctx, int sockid, struct server_vars *sv)
 			"Connection: %s\r\n\r\n", 
 			scode, StatusCodeToString(scode), t_str, sv->fsize, keepalive_str);
 	len = strlen(response);
-	TRACE_APP("Socket %d HTTP Response: \n%s", sockid, response);
+	printf("Socket %d HTTP Response: \n%s", sockid, response);
 	sent = mtcp_write(ctx->mctx, sockid, response, len);
-	TRACE_APP("Socket %d Sent response header: try: %d, sent: %d\n", 
+	printf("Socket %d Sent response header: try: %d, sent: %d\n", 
 			sockid, len, sent);
 	assert(sent == len);
 	sv->rspheader_sent = TRUE;
@@ -298,12 +298,12 @@ AcceptConnection(struct thread_context *ctx, int listener)
 
 		sv = &ctx->svars[c];
 		CleanServerVariable(sv);
-		TRACE_APP("New connection %d accepted.\n", c);
+		printf("New connection %d accepted.\n", c);
 		ev.events = MTCP_EPOLLIN;
 		ev.data.sockid = c;
 		mtcp_setsock_nonblock(ctx->mctx, c);
 		mtcp_epoll_ctl(mctx, ctx->ep, MTCP_EPOLL_CTL_ADD, c, &ev);
-		TRACE_APP("Socket %d registered.\n", c);
+		printf("Socket %d registered.\n", c);
 
 	} else {
 		if (errno != EAGAIN) {
@@ -465,7 +465,7 @@ RunServerThread(void *arg)
 				socklen_t len = sizeof(err);
 
 				/* error on the connection */
-				TRACE_APP("[CPU %d] Error on socket %d\n", 
+				printf("[CPU %d] Error on socket %d\n", 
 						core, events[i].data.sockid);
 				if (mtcp_getsockopt(mctx, events[i].data.sockid, 
 						SOL_SOCKET, SO_ERROR, (void *)&err, &len) == 0) {
@@ -500,7 +500,7 @@ RunServerThread(void *arg)
 				if (sv->rspheader_sent) {
 					SendUntilAvailable(ctx, events[i].data.sockid, sv);
 				} else {
-					TRACE_APP("Socket %d: Response header not sent yet.\n", 
+					printf("Socket %d: Response header not sent yet.\n", 
 							events[i].data.sockid);
 				}
 
