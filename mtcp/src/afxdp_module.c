@@ -179,6 +179,17 @@ static inline void complete_tx(struct xsk_socket_info *xsk)
 
 void afxdp_load_module(void){
 	const char *kern_path = afxdp_resolve_kern_path();
+
+	/* Skip libxdp's multi-prog dispatcher *before* xdp_program__create —
+	 * this env var is consulted at create/attach time. If we set it later,
+	 * libxdp may wrap our program in the dispatcher, which leaves us with
+	 * a dispatcher attached on the netdev and our program running as a
+	 * sub-program. In that case bpf_object__find_map_by_name() can resolve
+	 * to a different xsks_map than the one the running program actually
+	 * uses, so xsk_socket__update_xskmap() updates the wrong map and the
+	 * redirect lands in a socket nobody is polling. */
+	setenv("LIBXDP_SKIP_DISPATCHER", "1", 1);
+
 	DECLARE_LIBXDP_OPTS(xdp_program_opts, xdp_opts, .open_filename = kern_path,);
 	custom_xsk = true;
 
@@ -200,9 +211,6 @@ void afxdp_load_module(void){
         /* Hint: If this fails, run 'sudo dmesg' to see the verifier log */
         exit(EXIT_FAILURE);
     }
-
-	// Fails the attachment in old distros if dispatcher is loaded
-	setenv("LIBXDP_SKIP_DISPATCHER", "1", 1);
 
 	/* Attach the program on all configured interfaces. Try native (driver)
 	 * mode first for best performance; fall back to SKB (generic) mode if
@@ -237,6 +245,10 @@ void afxdp_load_module(void){
 
 		attached_mode[ifidx] = XDP_MODE_SKB;
 
+		fprintf(stderr,
+			"AFXDP: attached XDP (SKB mode) on iface '%s' kernel_ifindex=%d eidx=%d\n",
+			ifname ? ifname : "?", ifindex, ifidx);
+
 		/* Promiscuous mode */
 		if (ifname && ifname[0] != '\0') {
 			if (afxdp_set_promisc(ifname) < 0) {
@@ -246,7 +258,7 @@ void afxdp_load_module(void){
 			}
 		}
 	}
-    
+
     // Use the more efficient find_map_by_name instead of a manual loop
     struct bpf_map *map = bpf_object__find_map_by_name(obj, "xsks_map");
 
@@ -261,6 +273,10 @@ void afxdp_load_module(void){
         fprintf(stderr, "ERROR: xsks_map fd is invalid (%d). Is the program loaded?\n", xsk_map_fd);
         exit(EXIT_FAILURE);
     }
+
+    fprintf(stderr, "AFXDP: xsks_map resolved (fd=%d). Sockets will be inserted "
+                    "via xsk_socket__update_xskmap at queue_id=ctxt->cpu.\n",
+            xsk_map_fd);
 }
 
 static struct xsk_umem_info *configure_xsk_umem(void *buffer, uint64_t size)
@@ -320,7 +336,13 @@ static int xsk_configure_socket(struct xsk_socket_info *xsk_info, int ifidx,
 	xsk_cfg.rx_size      = RX_RING_SIZE;
 	xsk_cfg.tx_size      = TX_RING_SIZE;
 	xsk_cfg.xdp_flags    = 0;
-	xsk_cfg.bind_flags   = 0;
+	/* XDP_USE_NEED_WAKEUP lets the kernel signal when it needs userspace
+	 * to wake it (cheap when idle, required on some drivers in SKB+COPY
+	 * mode for timely RX). We must respect xsk_ring_prod__needs_wakeup()
+	 * on the FQ in the recv path below, otherwise we can stall waiting
+	 * for the kernel to fill an RX descriptor that it'll only fill after
+	 * we kick it. */
+	xsk_cfg.bind_flags   = XDP_USE_NEED_WAKEUP;
 	xsk_cfg.libbpf_flags = custom_xsk ? XSK_LIBBPF_FLAGS__INHIBIT_PROG_LOAD : 0;
 	if (first_on_umem) {
 		/* First socket on this UMEM: standard create */
@@ -440,6 +462,14 @@ void afxdp_init_handle(struct mtcp_thread_context *ctxt){
 				ifname, ctxt->cpu, strerror(errno));
 			exit(EXIT_FAILURE);
 		}
+
+		fprintf(stderr,
+			"AFXDP: cpu=%d bound xsk on iface '%s' (eidx=%d) queue_id=%u "
+			"first_on_umem=%d -> xsks_map[%u] = xsk_fd=%d\n",
+			ctxt->cpu, ifname, ifidx, (uint32_t)ctxt->cpu,
+			first_on_umem ? 1 : 0, (uint32_t)ctxt->cpu,
+			xsk_socket__fd(xsk_info->sock[ifidx].xsk));
+
 		first_on_umem = false;
 	}
 }
@@ -578,10 +608,18 @@ int32_t afxdp_recv_pkts(struct mtcp_thread_context *ctxt, int ifidx){
 
 		xsk_ring_prod__submit(&xsk_info->umem->fq, n);
 		xsk_info->rx_batch[ifidx].cnt = 0;
-
-		if (xsk_ring_prod__needs_wakeup(&xsk_info->umem->fq))
-			recvfrom(xsk_socket__fd(xsk_if->xsk), NULL, 0, MSG_DONTWAIT, NULL, 0);
 	}
+
+	/* Always service the FQ wakeup on every poll, not just after the first
+	 * batch lands. Otherwise on the very first call rx_batch.cnt == 0, we
+	 * skip the recycle block entirely, never kick the kernel, and the
+	 * kernel may sit waiting for a wakeup before it processes the FQ we
+	 * pre-filled in init_handle. With XDP_USE_NEED_WAKEUP set in
+	 * bind_flags, this is the chicken-and-egg case the user is likely
+	 * hitting: ping is redirected at XDP, but the RX descriptor never
+	 * surfaces because we never told the kernel "go". */
+	if (xsk_ring_prod__needs_wakeup(&xsk_info->umem->fq))
+		recvfrom(xsk_socket__fd(xsk_if->xsk), NULL, 0, MSG_DONTWAIT, NULL, 0);
 
 	rcvd = xsk_ring_cons__peek(&xsk_if->rx, RX_BATCH_SIZE, &idx_rx);
 	if (!rcvd)
@@ -595,6 +633,21 @@ int32_t afxdp_recv_pkts(struct mtcp_thread_context *ctxt, int ifidx){
 
 	xsk_ring_cons__release(&xsk_if->rx, rcvd);
 	xsk_info->rx_batch[ifidx].cnt = rcvd;
+
+	/* One-shot debug print so you can confirm packets are surfacing to
+	 * userspace at all. Remove (or wrap in TRACE_DBG) once verified. */
+	{
+		static __thread uint64_t total_rcvd = 0;
+		static __thread uint64_t last_print = 0;
+		total_rcvd += rcvd;
+		if (total_rcvd - last_print >= 1) {
+			fprintf(stderr,
+				"AFXDP: cpu=%d ifidx=%d rcvd=%u total=%lu\n",
+				ctxt->cpu, ifidx, rcvd,
+				(unsigned long)total_rcvd);
+			last_print = total_rcvd;
+		}
+	}
 
 	return (int32_t)rcvd;
 }
