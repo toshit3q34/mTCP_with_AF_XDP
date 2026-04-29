@@ -193,19 +193,6 @@ void afxdp_load_module(void){
 		exit(EXIT_FAILURE);
 	}
 
-	// Force load too
-	err = xdp_program__load(prog); if (err) { 
-		libxdp_strerror(err, errmsg, sizeof(errmsg)); 
-		fprintf(stderr, "ERROR: loading XDP program into kernel: %s (%d)\n", errmsg, err); 
-		exit(EXIT_FAILURE); 
-	}
-
-	if (num_devices_attached > MAX_DEVICES) {
-		fprintf(stderr, "ERROR: num_devices_attached (%d) exceeds MAX_DEVICES (%d)\n",
-			num_devices_attached, MAX_DEVICES);
-		exit(EXIT_FAILURE);
-	}
-
 	/* Attach the program on all configured interfaces. Try native (driver)
 	 * mode first for best performance; fall back to SKB (generic) mode if
 	 * the driver doesn't support native XDP. Bail hard if both fail —
@@ -261,24 +248,21 @@ void afxdp_load_module(void){
 
 	/* We also need to load the xsks_map */
 	struct bpf_object *obj = xdp_program__bpf_obj(prog);
-	struct bpf_map *map = NULL;
+    
+    // Use the more efficient find_map_by_name instead of a manual loop
+    struct bpf_map *map = bpf_object__find_map_by_name(obj, "xsks_map");
 
-	bpf_object__for_each_map(map, obj) {
-		const char *name = bpf_map__name(map);
-		if (name && strcmp(name, "xsks_map") == 0)
-			break;
-	}
+    if (!map) {
+        fprintf(stderr, "ERROR: no xsks map found in the BPF object\n");
+        exit(EXIT_FAILURE);
+    }
 
-	if (!map) {
-		fprintf(stderr, "ERROR: no xsks map found\n");
-		exit(EXIT_FAILURE);
-	}
-
-	xsk_map_fd = bpf_map__fd(map);
-	if (xsk_map_fd < 0) {
-		perror("ERROR: xsks_map fd");
-		exit(EXIT_FAILURE);
-	}
+    xsk_map_fd = bpf_map__fd(map);
+    if (xsk_map_fd < 0) {
+        // If it's still < 0 here, the load itself failed (check dmesg)
+        fprintf(stderr, "ERROR: xsks_map fd is invalid (%d). Is the program loaded?\n", xsk_map_fd);
+        exit(EXIT_FAILURE);
+    }
 }
 
 static struct xsk_umem_info *configure_xsk_umem(void *buffer, uint64_t size)
