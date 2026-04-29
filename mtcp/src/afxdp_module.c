@@ -472,12 +472,12 @@ void afxdp_init_handle(struct mtcp_thread_context *ctxt){
 	 * don't all collide on xsks_map[0]. See afxdp_kern.c which looks
 	 * the socket up via ctx->ingress_ifindex. */
 	bool first_on_umem = true;
-	for (int ifidx = 0; ifidx < num_devices_attached; ifidx++) {
+	for (int ifidx = 0; ifidx < MAX_DEVICES; ifidx++) {
 		const char *ifname = CONFIG.eths[ifidx].dev_name;
-		if(ifidx != 3){
+		const int kifindex = devices_attached[ifidx];
+		if(kifindex != 3){
 			continue;
 		}
-		const int kifindex = devices_attached[ifidx];
 		if (ifname == NULL || ifname[0] == '\0')
 			continue;
 
