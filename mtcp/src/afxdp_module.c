@@ -17,6 +17,12 @@
 #include <unistd.h>
 /* for sendto */
 #include <sys/socket.h>
+/* for setrlimit / RLIMIT_MEMLOCK */
+#include <sys/resource.h>
+/* for ifreq, IFF_PROMISC, IFNAMSIZ */
+#include <net/if.h>
+/* for ioctl */
+#include <sys/ioctl.h>
 
 /* for libbpf/libxdp/AF_XDP */
 #include <bpf/bpf.h>
@@ -28,21 +34,87 @@
 /* for num_devices_* */
 #include "config.h"
 
-#define NUM_FRAMES         4096
-#define FRAME_SIZE         XSK_UMEM__DEFAULT_FRAME_SIZE
-#define RX_BATCH_SIZE      64
-#define TX_BATCH_SIZE      64
+#define NUM_FRAMES     16384   // critical: shared across all interfaces
+
+#define FRAME_SIZE     XSK_UMEM__DEFAULT_FRAME_SIZE
+
+#define RX_BATCH_SIZE  64
+#define TX_BATCH_SIZE  64
+
+// Rings
+#define TX_RING_SIZE   512     // per interface (scaled down from 2048)
+#define RX_RING_SIZE   1024    // enough to absorb bursts
+#define FQ_RING_SIZE   4096    // shared: must be large to avoid RX starvation
+#define CQ_RING_SIZE   2048    // handles TX completion backlog
+// MAX_DEVICES -> MAX interfaces
 #define INVALID_UMEM_FRAME UINT64_MAX
 
+/* Default install location of the BPF kernel object. The build system
+ * may override this with -DAFXDP_KERN_PATH="..." to bake in an absolute
+ * path. At runtime, the AFXDP_KERN_PATH env var (if set & non-empty)
+ * takes precedence over the compile-time default. */
+#ifndef AFXDP_KERN_PATH
+#define AFXDP_KERN_PATH "afxdp_kern.o"
+#endif
+
+static const char *afxdp_resolve_kern_path(void)
+{
+	const char *p = getenv("AFXDP_KERN_PATH");
+	if (p && p[0] != '\0')
+		return p;
+	return AFXDP_KERN_PATH;
+}
+
 static struct xdp_program *prog;
-static const char filename[] = "afxdp_kern.o";
 static bool custom_xsk = false;
 static int xsk_map_fd;
 static int err;
 static char errmsg[1024];
+static int xdp_cleaned = 0;
 
-struct xsk_umem_info{
-    struct xsk_ring_prod fq;
+/* Per-iface XDP attach mode, recorded at attach time so cleanup can
+ * detach with the same mode. XDP_MODE_UNSPEC (= 0) means "not attached". */
+static enum xdp_attach_mode attached_mode[MAX_DEVICES];
+
+/* Enable promiscuous mode on `ifname` so AF_XDP can see all frames,
+ * not just those addressed to the iface MAC. Returns 0 on success or
+ * if promisc was already on. Returns -1 on failure (errno set). */
+static int afxdp_set_promisc(const char *ifname)
+{
+	struct ifreq ifr;
+	int sock, rc;
+
+	sock = socket(AF_INET, SOCK_DGRAM, 0);
+	if (sock < 0)
+		return -1;
+
+	memset(&ifr, 0, sizeof(ifr));
+	strncpy(ifr.ifr_name, ifname, IFNAMSIZ - 1);
+	ifr.ifr_name[IFNAMSIZ - 1] = '\0';
+
+	if (ioctl(sock, SIOCGIFFLAGS, &ifr) < 0) {
+		rc = -1;
+		goto out;
+	}
+
+	if (ifr.ifr_flags & IFF_PROMISC) {
+		rc = 0;     /* already promiscuous */
+		goto out;
+	}
+
+	ifr.ifr_flags |= IFF_PROMISC;
+	if (ioctl(sock, SIOCSIFFLAGS, &ifr) < 0) {
+		rc = -1;
+		goto out;
+	}
+	rc = 0;
+out:
+	close(sock);
+	return rc;
+}
+
+struct xsk_umem_info {
+	struct xsk_ring_prod fq;
 	struct xsk_ring_cons cq;
 	struct xsk_umem *umem;
 	void *buffer;
@@ -52,25 +124,25 @@ struct xsk_if_socket {
 	struct xsk_socket    *xsk;
 	struct xsk_ring_prod  tx;
 	struct xsk_ring_cons  rx;
-	uint32_t              outstanding_tx;
 };
 
 struct xsk_socket_info {
-    struct xsk_umem_info  *umem;
-    struct xsk_if_socket   sock[MAX_IFPORTS];
-    void                  *umem_area;  // replaces rte_mempool
-    uint64_t               umem_frame_addr[NUM_FRAMES]; // replaces m_table
-    uint32_t               umem_frame_free;
+	struct xsk_umem_info	*umem;
+	struct xsk_if_socket	sock[MAX_DEVICES];
+	void			*umem_area;			/* replaces rte_mempool */
+	uint64_t		umem_frame_addr[NUM_FRAMES];	/* replaces m_table */
+	uint32_t		umem_frame_free;
+	uint32_t		outstanding_tx;
 	struct {
 		uint32_t cnt;
 		uint64_t addr[RX_BATCH_SIZE];
 		uint32_t len[RX_BATCH_SIZE];
-	} rx_batch[MAX_IFPORTS];
+	} rx_batch[MAX_DEVICES];
 	struct {
 		uint32_t cnt;
 		uint64_t addr[TX_BATCH_SIZE];
 		uint32_t len[TX_BATCH_SIZE];
-	} tx_batch[MAX_IFPORTS];
+	} tx_batch[MAX_DEVICES];
 } __attribute__((aligned(64)));
 
 static inline void xsk_free_umem_frame(struct xsk_socket_info *xsk, uint64_t addr)
@@ -80,7 +152,7 @@ static inline void xsk_free_umem_frame(struct xsk_socket_info *xsk, uint64_t add
 	xsk->umem_frame_addr[xsk->umem_frame_free++] = addr;
 }
 
-static inline void complete_tx(struct xsk_socket_info *xsk, struct xsk_if_socket *xsk_if)
+static inline void complete_tx(struct xsk_socket_info *xsk)
 {
 	uint32_t idx_cq = 0;
 	uint32_t i;
@@ -96,57 +168,96 @@ static inline void complete_tx(struct xsk_socket_info *xsk, struct xsk_if_socket
 
 	xsk_ring_cons__release(&xsk->umem->cq, completed);
 
-	if (xsk_if->outstanding_tx >= completed)
-		xsk_if->outstanding_tx -= completed;
+	if (xsk->outstanding_tx >= completed)
+		xsk->outstanding_tx -= completed;
 	else
-		xsk_if->outstanding_tx = 0;
+		xsk->outstanding_tx = 0;
 }
 
 void afxdp_load_module(void){
-    DECLARE_LIBXDP_OPTS(xdp_program_opts, xdp_opts, .open_filename = filename,);
-    struct bpf_map *map;
-	int ifidx;
+	const char *kern_path = afxdp_resolve_kern_path();
+	DECLARE_LIBXDP_OPTS(xdp_program_opts, xdp_opts, .open_filename = kern_path,);
+	struct bpf_map *map;
 	custom_xsk = true;
-    prog = xdp_program__create(&xdp_opts);
-    err = libxdp_get_error(prog);
-    if (err) {
-        libxdp_strerror(err, errmsg, sizeof(errmsg));
-        fprintf(stderr, "ERR: loading program: %s\n", errmsg);
-        return;
-    }
 
-	if (num_devices_attached > MAX_IFPORTS) {
-		fprintf(stderr, "ERROR: num_devices_attached (%d) exceeds MAX_IFPORTS (%d)\n",
-			num_devices_attached, MAX_IFPORTS);
+	prog = xdp_program__create(&xdp_opts);
+	err = libxdp_get_error(prog);
+	if (err) {
+		libxdp_strerror(err, errmsg, sizeof(errmsg));
+		fprintf(stderr, "ERROR: loading XDP program from '%s': %s (%d)\n"
+			"Hint: set AFXDP_KERN_PATH env var or rebuild with "
+			"-DAFXDP_KERN_PATH=\"/abs/path/to/afxdp_kern.o\"\n",
+			kern_path, errmsg, err);
 		exit(EXIT_FAILURE);
 	}
 
-	/* Attach the program on all configured interfaces */
-	for (ifidx = 0; ifidx < num_devices_attached; ifidx++) {
-		const int ifindex = CONFIG.eths[ifidx].ifindex;
+	if (num_devices_attached > MAX_DEVICES) {
+		fprintf(stderr, "ERROR: num_devices_attached (%d) exceeds MAX_DEVICES (%d)\n",
+			num_devices_attached, MAX_DEVICES);
+		exit(EXIT_FAILURE);
+	}
+
+	/* Attach the program on all configured interfaces. Try native (driver)
+	 * mode first for best performance; fall back to SKB (generic) mode if
+	 * the driver doesn't support native XDP. Bail hard if both fail —
+	 * mTCP can't function without an attached program.
+	 *
+	 * Note: devices_attached[ifidx] is the real Linux kernel ifindex
+	 * (populated by SetNetEnv via if_nametoindex). CONFIG.eths[ifidx].ifindex
+	 * is mTCP's internal small port number — different thing, do not pass
+	 * it to xdp_program__attach(). */
+	for (int ifidx = 0; ifidx < num_devices_attached; ifidx++) {
+		const int ifindex  = devices_attached[ifidx];
 		const char *ifname = CONFIG.eths[ifidx].dev_name;
+
+		attached_mode[ifidx] = XDP_MODE_UNSPEC;
 
 		if (ifindex <= 0)
 			continue;
 
-		err = xdp_program__attach(prog, ifindex, XDP_MODE_NATIVE, 0);
-		if (err) {
+		err = xdp_program__attach(prog, ifindex, XDP_MODE_NATIVE,
+					  XDP_FLAGS_UPDATE_IF_NOEXIST);
+		if (!err) {
+			attached_mode[ifidx] = XDP_MODE_NATIVE;
+		} else {
 			libxdp_strerror(err, errmsg, sizeof(errmsg));
 			fprintf(stderr,
-				"Couldn't attach XDP program on iface '%s' (ifindex=%d): %s (%d)\n",
+				"Native-mode XDP attach failed on iface '%s' (ifindex=%d): %s (%d). "
+				"Falling back to SKB mode.\n",
 				ifname ? ifname : "?", ifindex, errmsg, err);
-			return;
+
+			err = xdp_program__attach(prog, ifindex, XDP_MODE_SKB,
+						  XDP_FLAGS_UPDATE_IF_NOEXIST);
+			if (err) {
+				libxdp_strerror(err, errmsg, sizeof(errmsg));
+				fprintf(stderr,
+					"SKB-mode XDP attach also failed on iface '%s' (ifindex=%d): %s (%d)\n",
+					ifname ? ifname : "?", ifindex, errmsg, err);
+				exit(EXIT_FAILURE);
+			}
+			attached_mode[ifidx] = XDP_MODE_SKB;
+		}
+
+		/* Put the iface in promiscuous mode so we receive everything,
+		 * not only frames addressed to the iface MAC. */
+		if (ifname && ifname[0] != '\0') {
+			if (afxdp_set_promisc(ifname) < 0) {
+				fprintf(stderr,
+					"WARN: couldn't enable promisc on '%s': %s\n",
+					ifname, strerror(errno));
+				/* non-fatal: mTCP may still work for unicast traffic */
+			}
 		}
 	}
 
-    /* We also need to load the xsks_map */
-    map = bpf_object__find_map_by_name(xdp_program__bpf_obj(prog), "xsks_map");
-    xsk_map_fd = bpf_map__fd(map);
-    if (xsk_map_fd < 0) {
-        fprintf(stderr, "ERROR: no xsks map found: %s\n",
-            strerror(xsk_map_fd));
-        exit(EXIT_FAILURE);
-    }
+	/* We also need to load the xsks_map */
+	map = bpf_object__find_map_by_name(xdp_program__bpf_obj(prog), "xsks_map");
+	xsk_map_fd = bpf_map__fd(map);
+	if (xsk_map_fd < 0) {
+		fprintf(stderr, "ERROR: no xsks map found: %s\n",
+			strerror(xsk_map_fd));
+		exit(EXIT_FAILURE);
+	}
 }
 
 static struct xsk_umem_info *configure_xsk_umem(void *buffer, uint64_t size)
@@ -154,12 +265,20 @@ static struct xsk_umem_info *configure_xsk_umem(void *buffer, uint64_t size)
 	struct xsk_umem_info *umem;
 	int ret;
 
+	struct xsk_umem_config umem_cfg = {
+		.fill_size      = FQ_RING_SIZE,
+		.comp_size      = CQ_RING_SIZE,
+		.frame_size     = FRAME_SIZE,
+		.frame_headroom = 0,
+		.flags          = 0,
+	};
+
 	umem = calloc(1, sizeof(*umem));
 	if (!umem)
 		return NULL;
 
 	ret = xsk_umem__create(&umem->umem, buffer, size, &umem->fq, &umem->cq,
-			       NULL);
+			       &umem_cfg);
 	if (ret) {
 		errno = -ret;
 		free(umem);
@@ -182,27 +301,38 @@ static uint64_t xsk_alloc_umem_frame(struct xsk_socket_info *xsk)
 }
 
 static int xsk_configure_socket(struct xsk_socket_info *xsk_info, int ifidx,
-				const char *ifname, uint32_t queue_id)
+				const char *ifname, uint32_t queue_id, bool first_on_umem)
 {
 	struct xsk_socket_config xsk_cfg;
 	struct xsk_if_socket *xsk_if;
-	int i;
 	int ret;
 
-	if (ifidx < 0 || ifidx >= MAX_IFPORTS) {
+	if (ifidx < 0 || ifidx >= MAX_DEVICES) {
 		errno = EINVAL;
 		return -1;
 	}
 
 	xsk_if = &xsk_info->sock[ifidx];
-	xsk_cfg.rx_size = XSK_RING_CONS__DEFAULT_NUM_DESCS;
-	xsk_cfg.tx_size = XSK_RING_PROD__DEFAULT_NUM_DESCS;
-	xsk_cfg.xdp_flags = 0;
-	xsk_cfg.bind_flags = 0;
-	xsk_cfg.libbpf_flags = (custom_xsk) ? XSK_LIBBPF_FLAGS__INHIBIT_PROG_LOAD: 0;
-	ret = xsk_socket__create(&xsk_if->xsk, ifname,
-				 queue_id, xsk_info->umem->umem, &xsk_if->rx,
-				 &xsk_if->tx, &xsk_cfg);
+	memset(&xsk_cfg, 0, sizeof(xsk_cfg));
+	xsk_cfg.rx_size      = RX_RING_SIZE;
+	xsk_cfg.tx_size      = TX_RING_SIZE;
+	xsk_cfg.xdp_flags    = 0;
+	xsk_cfg.bind_flags   = 0;
+	xsk_cfg.libbpf_flags = custom_xsk ? XSK_LIBBPF_FLAGS__INHIBIT_PROG_LOAD : 0;
+	if (first_on_umem) {
+		/* First socket on this UMEM: standard create */
+		ret = xsk_socket__create(&xsk_if->xsk, ifname, queue_id,
+					 xsk_info->umem->umem,
+					 &xsk_if->rx, &xsk_if->tx, &xsk_cfg);
+	} else {
+		/* Subsequent socket: must use _shared and pass the UMEM's FQ/CQ */
+		ret = xsk_socket__create_shared(&xsk_if->xsk, ifname, queue_id,
+						xsk_info->umem->umem,
+						&xsk_if->rx, &xsk_if->tx,
+						&xsk_info->umem->fq,
+						&xsk_info->umem->cq,
+						&xsk_cfg);
+	}
 	if (ret)
 		goto error_exit;
 
@@ -221,16 +351,20 @@ error_exit:
 
 void afxdp_init_handle(struct mtcp_thread_context *ctxt){
 
-    // CHECK IF NEED TO BE ADDED
-    // if (setrlimit(RLIMIT_MEMLOCK, &rlim)) {
-	// 	fprintf(stderr, "ERROR: setrlimit(RLIMIT_MEMLOCK) \"%s\"\n",
-	// 		strerror(errno));
-	// 	exit(EXIT_FAILURE);
-	// }
+	/* Allow unlimited locking of memory so the UMEM allocation
+	 * can be pinned. Required on kernels < 5.11 (and on 5.11+
+	 * when CONFIG_MEMCG is not in effect). Idempotent across
+	 * threads, so calling it per-init is harmless. */
+	struct rlimit rlim = { RLIM_INFINITY, RLIM_INFINITY };
+	if (setrlimit(RLIMIT_MEMLOCK, &rlim)) {
+		fprintf(stderr, "ERROR: setrlimit(RLIMIT_MEMLOCK) \"%s\"\n",
+			strerror(errno));
+		exit(EXIT_FAILURE);
+	}
 
-    uint64_t packet_buffer_size = NUM_FRAMES * FRAME_SIZE;
-    /* Allocate memory for NUM_FRAMES of the default XDP frame size */
-    void* packet_buffer;
+	/* Allocate memory for NUM_FRAMES of the default XDP frame size */
+	uint64_t packet_buffer_size = NUM_FRAMES * FRAME_SIZE;
+	void *packet_buffer;
 	if (posix_memalign(&packet_buffer,
 			   getpagesize(), /* PAGE_SIZE aligned */
 			   packet_buffer_size)) {
@@ -239,7 +373,7 @@ void afxdp_init_handle(struct mtcp_thread_context *ctxt){
 		exit(EXIT_FAILURE);
 	}
 
-    struct xsk_umem_info *umem = configure_xsk_umem(packet_buffer, packet_buffer_size);
+	struct xsk_umem_info *umem = configure_xsk_umem(packet_buffer, packet_buffer_size);
 	if (umem == NULL) {
 		fprintf(stderr, "ERROR: Can't create umem \"%s\"\n",
 			strerror(errno));
@@ -254,33 +388,32 @@ void afxdp_init_handle(struct mtcp_thread_context *ctxt){
 	}
 
 	struct xsk_socket_info *xsk_info = (struct xsk_socket_info *)ctxt->io_private_context;
-	int ifidx, i;
 
 	xsk_info->umem = umem;
 
-	if (num_devices_attached > MAX_IFPORTS) {
-		fprintf(stderr, "ERROR: num_devices_attached (%d) exceeds MAX_IFPORTS (%d)\n",
-			num_devices_attached, MAX_IFPORTS);
+	if (num_devices_attached > MAX_DEVICES) {
+		fprintf(stderr, "ERROR: num_devices_attached (%d) exceeds MAX_DEVICES (%d)\n",
+			num_devices_attached, MAX_DEVICES);
 		exit(EXIT_FAILURE);
 	}
 
 	/* Initialize umem frame allocation */
-	for (i = 0; i < NUM_FRAMES; i++)
+	for (uint32_t i = 0; i < NUM_FRAMES; i++)
 		xsk_info->umem_frame_addr[i] = (uint64_t)i * FRAME_SIZE;
 	xsk_info->umem_frame_free = NUM_FRAMES;
 
 	/* Pre-fill the shared UMEM fill queue once */
 	{
 		uint32_t idx_fq = 0;
-		const uint32_t fq_descs = XSK_RING_PROD__DEFAULT_NUM_DESCS;
-		int reserved = xsk_ring_prod__reserve(&xsk_info->umem->fq, fq_descs, &idx_fq);
-		if (reserved != (int)fq_descs) {
-			fprintf(stderr, "ERROR: Can't reserve FQ descs (want=%u got=%d): \"%s\"\n",
+		const uint32_t fq_descs = FQ_RING_SIZE;
+		uint32_t reserved = xsk_ring_prod__reserve(&xsk_info->umem->fq, fq_descs, &idx_fq);
+		if (reserved != fq_descs) {
+			fprintf(stderr, "ERROR: Can't reserve FQ descs (want=%u got=%u): \"%s\"\n",
 				fq_descs, reserved, strerror(errno));
 			exit(EXIT_FAILURE);
 		}
 
-		for (i = 0; i < (int)fq_descs; i++) {
+		for (uint32_t i = 0; i < fq_descs; i++) {
 			uint64_t addr = xsk_alloc_umem_frame(xsk_info);
 			if (addr == INVALID_UMEM_FRAME) {
 				fprintf(stderr, "ERROR: Out of UMEM frames during FQ prefill\n");
@@ -292,21 +425,24 @@ void afxdp_init_handle(struct mtcp_thread_context *ctxt){
 	}
 
 	/* Create one socket per configured interface for this core(queue) */
-	for (ifidx = 0; ifidx < num_devices_attached; ifidx++) {
+	bool first_on_umem = true;
+	for (int ifidx = 0; ifidx < num_devices_attached; ifidx++) {
 		const char *ifname = CONFIG.eths[ifidx].dev_name;
 		if (ifname == NULL || ifname[0] == '\0')
 			continue;
 
-		if (xsk_configure_socket(xsk_info, ifidx, ifname, (uint32_t)ctxt->cpu) != 0) {
+		if (xsk_configure_socket(xsk_info, ifidx, ifname,
+					 (uint32_t)ctxt->cpu, first_on_umem) != 0) {
 			fprintf(stderr, "ERROR: Can't setup AF_XDP socket on iface '%s' q=%d: \"%s\"\n",
 				ifname, ctxt->cpu, strerror(errno));
 			exit(EXIT_FAILURE);
 		}
+		first_on_umem = false;
 	}
 }
 
 int32_t afxdp_link_devices(struct mtcp_thread_context *ctxt){
-    /* linking takes place during mtcp_init() */
+	/* linking takes place during mtcp_init() */
 
 	return 0;
 }
@@ -323,7 +459,7 @@ uint8_t * afxdp_get_wptr(struct mtcp_thread_context *ctxt, int ifidx, uint16_t l
 	struct xsk_if_socket *xsk_if;
 	uint64_t addr;
 
-	if (!xsk_info || ifidx < 0 || ifidx >= MAX_IFPORTS)
+	if (!xsk_info || ifidx < 0 || ifidx >= MAX_DEVICES)
 		return NULL;
 
 	xsk_if = &xsk_info->sock[ifidx];
@@ -352,7 +488,7 @@ int32_t afxdp_send_pkts(struct mtcp_thread_context *ctxt, int nif){
 	uint32_t i;
 	int ret;
 
-	if (!xsk_info || nif < 0 || nif >= MAX_IFPORTS)
+	if (!xsk_info || nif < 0 || nif >= MAX_DEVICES)
 		return 0;
 
 	xsk_if = &xsk_info->sock[nif];
@@ -360,7 +496,7 @@ int32_t afxdp_send_pkts(struct mtcp_thread_context *ctxt, int nif){
 		return 0;
 
 	/* Reclaim completed TX frames back to free list */
-	complete_tx(xsk_info, xsk_if);
+	complete_tx(xsk_info);
 
 	n = xsk_info->tx_batch[nif].cnt;
 	if (!n)
@@ -377,7 +513,7 @@ int32_t afxdp_send_pkts(struct mtcp_thread_context *ctxt, int nif){
 	}
 
 	xsk_ring_prod__submit(&xsk_if->tx, n);
-	xsk_if->outstanding_tx += n;
+	xsk_info->outstanding_tx += n;
 
 	/* Kick kernel if needed */
 	if (xsk_ring_prod__needs_wakeup(&xsk_if->tx))
@@ -390,7 +526,7 @@ int32_t afxdp_send_pkts(struct mtcp_thread_context *ctxt, int nif){
 uint8_t * afxdp_get_rptr(struct mtcp_thread_context *ctxt, int ifidx, int index, uint16_t *len){
 	struct xsk_socket_info *xsk_info = (struct xsk_socket_info *)ctxt->io_private_context;
 
-	if (!xsk_info || ifidx < 0 || ifidx >= MAX_IFPORTS || index < 0) {
+	if (!xsk_info || ifidx < 0 || ifidx >= MAX_DEVICES || index < 0) {
 		if (len)
 			*len = 0;
 		return NULL;
@@ -415,9 +551,8 @@ int32_t afxdp_recv_pkts(struct mtcp_thread_context *ctxt, int ifidx){
 	uint32_t idx_rx = 0, idx_fq = 0;
 	uint32_t rcvd;
 	uint32_t i;
-	int ret;
 
-	if (!xsk_info || ifidx < 0 || ifidx >= MAX_IFPORTS)
+	if (!xsk_info || ifidx < 0 || ifidx >= MAX_DEVICES)
 		return 0;
 
 	xsk_if = &xsk_info->sock[ifidx];
@@ -428,10 +563,11 @@ int32_t afxdp_recv_pkts(struct mtcp_thread_context *ctxt, int ifidx){
 	if (xsk_info->rx_batch[ifidx].cnt) {
 		uint32_t n = xsk_info->rx_batch[ifidx].cnt;
 
-		/* One attempt: recycle what we can, don't spin */
-		ret = xsk_ring_prod__reserve(&xsk_info->umem->fq, n, &idx_fq);
-		if (ret != (int)n)
-			return 0;
+		if (xsk_prod_nb_free(&xsk_info->umem->fq, n) < n)
+			return 0;	/* FQ has no room; try again next call */
+
+		/* xsk_prod_nb_free above guarantees this returns n exactly. */
+		(void)xsk_ring_prod__reserve(&xsk_info->umem->fq, n, &idx_fq);
 
 		for (i = 0; i < n; i++)
 			*xsk_ring_prod__fill_addr(&xsk_info->umem->fq, idx_fq + i) =
@@ -439,6 +575,9 @@ int32_t afxdp_recv_pkts(struct mtcp_thread_context *ctxt, int ifidx){
 
 		xsk_ring_prod__submit(&xsk_info->umem->fq, n);
 		xsk_info->rx_batch[ifidx].cnt = 0;
+
+		if (xsk_ring_prod__needs_wakeup(&xsk_info->umem->fq))
+			recvfrom(xsk_socket__fd(xsk_if->xsk), NULL, 0, MSG_DONTWAIT, NULL, 0);
 	}
 
 	rcvd = xsk_ring_cons__peek(&xsk_if->rx, RX_BATCH_SIZE, &idx_rx);
@@ -464,15 +603,34 @@ int32_t	afxdp_select(struct mtcp_thread_context *ctxt){
 	return 0;
 }
 
+static void afxdp_prog_cleanup(void)
+{
+	if (!prog)
+		return;
+
+	for (int ifidx = 0; ifidx < num_devices_attached; ifidx++) {
+		int ifindex = devices_attached[ifidx];	/* real kernel ifindex */
+		if (ifindex <= 0)
+			continue;
+		if (attached_mode[ifidx] == XDP_MODE_UNSPEC)
+			continue;       /* never attached on this iface */
+
+		xdp_program__detach(prog, ifindex, attached_mode[ifidx], 0);
+		attached_mode[ifidx] = XDP_MODE_UNSPEC;
+	}
+
+	xdp_program__close(prog);
+	prog = NULL;
+}
+
 void
 afxdp_destroy_handle(struct mtcp_thread_context *ctxt){
 	struct xsk_socket_info *xsk_info = (struct xsk_socket_info *)ctxt->io_private_context;
-	int i;
 
 	if (!xsk_info)
 		return;
 
-	for (i = 0; i < MAX_IFPORTS; i++) {
+	for (int i = 0; i < MAX_DEVICES; i++) {
 		if (xsk_info->sock[i].xsk)
 			xsk_socket__delete(xsk_info->sock[i].xsk);
 	}
@@ -486,6 +644,10 @@ afxdp_destroy_handle(struct mtcp_thread_context *ctxt){
 
 	free(xsk_info);
 	ctxt->io_private_context = NULL;
+
+	if (__sync_bool_compare_and_swap(&xdp_cleaned, 0, 1)) {
+		afxdp_prog_cleanup();
+	}
 }
 
 int32_t
@@ -498,17 +660,31 @@ afxdp_dev_ioctl(struct mtcp_thread_context *ctx, int nif, int cmd, void *argp){
 }
 
 struct io_module_func afxdp_module_func = {
-    .load_module     = afxdp_load_module,
-    .init_handle     = afxdp_init_handle,
-    .link_devices    = afxdp_link_devices,
-    .release_pkt     = afxdp_release_pkt,
-    .send_pkts       = afxdp_send_pkts,
-    .get_wptr        = afxdp_get_wptr,
-    .recv_pkts       = afxdp_recv_pkts,
-    .get_rptr        = afxdp_get_rptr,
-    .select          = afxdp_select,
-    .destroy_handle  = afxdp_destroy_handle,
-    .dev_ioctl       = afxdp_dev_ioctl,
+	.load_module	= afxdp_load_module,
+	.init_handle	= afxdp_init_handle,
+	.link_devices	= afxdp_link_devices,
+	.release_pkt	= afxdp_release_pkt,
+	.send_pkts	= afxdp_send_pkts,
+	.get_wptr	= afxdp_get_wptr,
+	.recv_pkts	= afxdp_recv_pkts,
+	.get_rptr	= afxdp_get_rptr,
+	.select		= afxdp_select,
+	.destroy_handle	= afxdp_destroy_handle,
+	.dev_ioctl	= afxdp_dev_ioctl,
 };
-
-#endif
+#else
+io_module_func afxdp_module_func = {
+	.load_module		   = NULL,
+	.init_handle		   = NULL,
+	.link_devices		   = NULL,
+	.release_pkt		   = NULL,
+	.send_pkts		   = NULL,
+	.get_wptr   		   = NULL,
+	.recv_pkts		   = NULL,
+	.get_rptr	   	   = NULL,
+	.select			   = NULL,
+	.destroy_handle		   = NULL,
+	.dev_ioctl		   = NULL
+};
+/*----------------------------------------------------------------------------*/
+#endif /* !DISABLE_AFXDP */

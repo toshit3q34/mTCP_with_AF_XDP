@@ -676,6 +676,88 @@ SetNetEnv(char *dev_name_list, char *port_stat_list)
 
 		freeifaddrs(ifap);
 #endif /* ENABLE_ONVM */
+	} else if (current_iomodule_func == &afxdp_module_func) {
+#ifndef DISABLE_AFXDP
+		struct ifaddrs *ifap;
+		struct ifaddrs *iter_if;
+		char *seek;
+
+		num_queues = MIN(CONFIG.num_cores, MAX_CPUS);
+
+		if (getifaddrs(&ifap) != 0) {
+			perror("getifaddrs: ");
+			exit(EXIT_FAILURE);
+		}
+
+		iter_if = ifap;
+		do {
+			if (iter_if->ifa_addr && iter_if->ifa_addr->sa_family == AF_INET &&
+			    !set_all_inf &&
+			    (seek=strstr(dev_name_list, iter_if->ifa_name)) != NULL &&
+			    /* check if the interface was not aliased */
+			    *(seek + strlen(iter_if->ifa_name)) != ':') {
+				struct ifreq ifr;
+
+				/* Setting informations */
+				eidx = CONFIG.eths_num++;
+				strcpy(CONFIG.eths[eidx].dev_name, iter_if->ifa_name);
+				strcpy(ifr.ifr_name, iter_if->ifa_name);
+
+				/* Create socket */
+				int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
+				if (sock == -1) {
+					perror("socket");
+					exit(EXIT_FAILURE);
+				}
+
+				/* getting address */
+				if (ioctl(sock, SIOCGIFADDR, &ifr) == 0 ) {
+					struct in_addr sin = ((struct sockaddr_in *)&ifr.ifr_addr)->sin_addr;
+					CONFIG.eths[eidx].ip_addr = *(uint32_t *)&sin;
+				}
+
+				if (ioctl(sock, SIOCGIFHWADDR, &ifr) == 0 ) {
+					for (j = 0; j < ETH_ALEN; j ++) {
+						CONFIG.eths[eidx].haddr[j] = ifr.ifr_addr.sa_data[j];
+					}
+				}
+
+				/* Net MASK */
+				if (ioctl(sock, SIOCGIFNETMASK, &ifr) == 0) {
+					struct in_addr sin = ((struct sockaddr_in *)&ifr.ifr_addr)->sin_addr;
+					CONFIG.eths[eidx].netmask = *(uint32_t *)&sin;
+				}
+				close(sock);
+
+				/* CONFIG.eths[].ifindex is mTCP's internal "port
+				 * number" (must fit in nif_to_eidx[] which is
+				 * MAX_DEVICES-sized). The real kernel ifindex
+				 * goes into devices_attached[] below; AF_XDP code
+				 * reads it from there when calling
+				 * xdp_program__attach() / xsk_socket__create(). */
+				CONFIG.eths[eidx].ifindex = eidx;
+				TRACE_INFO("Interface %s eidx=%d kernel ifindex=%u\n",
+					   ifr.ifr_name, eidx,
+					   if_nametoindex(ifr.ifr_name));
+
+				/* add to attached devices */
+				for (j = 0; j < num_devices_attached; j++) {
+					if (devices_attached[j] == (int)if_nametoindex(ifr.ifr_name)) {
+						break;
+					}
+				}
+				devices_attached[num_devices_attached] = if_nametoindex(ifr.ifr_name);
+				num_devices_attached++;
+				fprintf(stderr, "Total number of attached devices: %d\n",
+					num_devices_attached);
+				fprintf(stderr, "Interface name: %s\n",
+					iter_if->ifa_name);
+			}
+			iter_if = iter_if->ifa_next;
+		} while (iter_if != NULL);
+
+		freeifaddrs(ifap);
+#endif /* !DISABLE_AFXDP */
 	}
 
 	CONFIG.nif_to_eidx = (int*)calloc(MAX_DEVICES, sizeof(int));

@@ -76,6 +76,8 @@ AC_SUBST(PSIO, 0)
 AC_SUBST(ONVM, 0)
 # Reset NETMAP to 0
 AC_SUBST(NETMAP, 0)
+# Reset AFXDP to 0
+AC_SUBST(AFXDP, 0)
 # Reset HWCSUM to 1
 AC_SUBST(HWCSUM, 1)
 
@@ -140,6 +142,14 @@ AS_IF([test "x$enable_netmap" = "xyes"], [
 	    AC_SUBST(NETMAP, 1)
 ])
 
+dnl AF_XDP module (default disabled). Requires libxdp / libbpf / libelf / libz.
+AC_ARG_ENABLE([afxdp],
+	AS_HELP_STRING([--enable-afxdp], [Enable AF_XDP module]))
+
+AS_IF([test "x$enable_afxdp" = "xyes"], [
+	    AC_SUBST(AFXDP, 1)
+])
+
 # Check onvm lib path
 AC_ARG_WITH(stuff, [  --with-onvm-lib      path to the onvm install root])
 if test "$with_onvm_lib" != ""
@@ -148,9 +158,9 @@ then
 	AC_SUBST(ONVM, 1)
 fi
 
-if test "$with_psio_lib" == "" && test "$with_dpdk_lib" == "" && test "$enable_netmap" = ""
+if test "$with_psio_lib" == "" && test "$with_dpdk_lib" == "" && test "$enable_netmap" = "" && test "$enable_afxdp" = ""
 then
-	AC_MSG_ERROR([Packet I/O library is missing. Please set either dpdk or psio or netmap as your I/O lib.])
+	AC_MSG_ERROR([Packet I/O library is missing. Please set either dpdk, psio, netmap, or afxdp as your I/O lib.])
 fi
 
 if test "x$enable_ccp" = "xyes"
