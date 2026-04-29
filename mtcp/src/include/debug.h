@@ -155,10 +155,11 @@
 #define TRACE_FSTAT(f, m...)   (void)0
 #endif
 
+// Changed temporarily to print stmts
 #ifdef APP
 #define TRACE_APP(f, m...) TRACE_FUNC("APP", f, ##m)
 #else
-#define TRACE_APP(f, m...) (void)0
+#define TRACE_APP(f, m...) fprintf(stderr, f, ##m)
 #endif
 
 #ifdef DBGFIN

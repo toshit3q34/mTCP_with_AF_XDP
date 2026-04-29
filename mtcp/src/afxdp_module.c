@@ -201,6 +201,9 @@ void afxdp_load_module(void){
         exit(EXIT_FAILURE);
     }
 
+	// Fails the attachment in old distros if dispatcher is loaded
+	setenv("LIBXDP_SKIP_DISPATCHER", "1", 1);
+
 	/* Attach the program on all configured interfaces. Try native (driver)
 	 * mode first for best performance; fall back to SKB (generic) mode if
 	 * the driver doesn't support native XDP. Bail hard if both fail —
