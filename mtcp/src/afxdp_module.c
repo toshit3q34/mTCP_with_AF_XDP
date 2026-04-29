@@ -224,7 +224,7 @@ void afxdp_load_module(void){
 	for (int ifidx = 0; ifidx < num_devices_attached; ifidx++) {
 		const int ifindex  = devices_attached[ifidx];
 		const char *ifname = CONFIG.eths[ifidx].dev_name;
-		if(ifname != "eno1d1"){
+		if(ifindex != 3){
 			continue;
 		}
 
@@ -474,7 +474,7 @@ void afxdp_init_handle(struct mtcp_thread_context *ctxt){
 	bool first_on_umem = true;
 	for (int ifidx = 0; ifidx < num_devices_attached; ifidx++) {
 		const char *ifname = CONFIG.eths[ifidx].dev_name;
-		if(ifname != "eno1d1"){
+		if(ifidx != 3){
 			continue;
 		}
 		const int kifindex = devices_attached[ifidx];
