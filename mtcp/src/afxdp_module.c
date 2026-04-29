@@ -219,7 +219,7 @@ void afxdp_load_module(void){
 		if (ifindex <= 0)
 			continue;
 
-		err = xdp_program__attach(prog, ifindex, XDP_MODE_NATIVE,
+		err = xdp_program__attach(prog, ifindex, 0,
 					  XDP_FLAGS_UPDATE_IF_NOEXIST);
 		if (!err) {
 			attached_mode[ifidx] = XDP_MODE_NATIVE;
