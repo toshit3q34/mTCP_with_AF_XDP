@@ -224,7 +224,7 @@ void afxdp_load_module(void){
 	for (int ifidx = 0; ifidx < num_devices_attached; ifidx++) {
 		const int ifindex  = devices_attached[ifidx];
 		const char *ifname = CONFIG.eths[ifidx].dev_name;
-		if(ifname != "eno1d1"){
+		if(ifname != "eno1"){
 			continue;
 		}
 
@@ -646,7 +646,7 @@ int32_t afxdp_recv_pkts(struct mtcp_thread_context *ctxt, int ifidx){
 		recvfrom(xsk_socket__fd(xsk_if->xsk), NULL, 0, MSG_DONTWAIT, NULL, 0);
 
 	rcvd = xsk_ring_cons__peek(&xsk_if->rx, RX_BATCH_SIZE, &idx_rx);
-	fprintf(stderr, "AFXDP: Number of packets received atp : %d\n", (int)rcvd);
+	// fprintf(stderr, "AFXDP: Number of packets received atp : %d\n", (int)rcvd);
 	if (!rcvd)
 		return 0;
 
