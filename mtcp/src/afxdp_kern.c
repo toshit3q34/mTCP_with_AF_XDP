@@ -23,10 +23,7 @@
  *     the third-arg flag to bpf_redirect_map below.
  */
 
-#include <linux/bpf.h>
-#include <linux/if_ether.h>
-#include <linux/ip.h>
-#include <linux/tcp.h>
+#include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
 
@@ -36,9 +33,8 @@
 struct {
     __uint(type, BPF_MAP_TYPE_XSKMAP);
     __uint(max_entries, 64);
-    __uint(key_size, sizeof(__u32));
-    __uint(value_size, sizeof(__u32));
-    __uint(pinning, LIBBPF_PIN_BY_NAME);
+    __type(key, __u32);
+    __type(value, __u32);
 } xsks_map SEC(".maps");
 
 SEC("xdp")
