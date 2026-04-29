@@ -15,6 +15,7 @@
 #include <limits.h>
 
 #include "netlib.h"
+struct Options Options;
 
 /*----------------------------------------------------------------------------*/
 int 
