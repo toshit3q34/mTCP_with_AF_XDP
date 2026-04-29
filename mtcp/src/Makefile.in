@@ -176,7 +176,7 @@ $(DEPS): .%.d: %.c Makefile
 # The resulting object should match the path baked in at AFXDP_KERN_PATH
 # (or be locatable via the AFXDP_KERN_PATH env var at runtime).
 BPF_CLANG ?= clang
-BPF_CFLAGS ?= -O2 -g -Wall -target bpf
+BPF_CFLAGS ?= -O2 -g -Wall -target bpf -g
 afxdp_kern.o: afxdp_kern.c
 	$(MSG) "   BPF $<"
 	$(HIDE) $(BPF_CLANG) $(BPF_CFLAGS) $(INC) -c $< -o $@
