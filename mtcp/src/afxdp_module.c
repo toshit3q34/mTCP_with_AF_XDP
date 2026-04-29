@@ -320,7 +320,8 @@ static uint64_t xsk_alloc_umem_frame(struct xsk_socket_info *xsk)
 }
 
 static int xsk_configure_socket(struct xsk_socket_info *xsk_info, int ifidx,
-				const char *ifname, uint32_t queue_id, bool first_on_umem)
+				const char *ifname, uint32_t queue_id,
+				int kernel_ifindex, bool first_on_umem)
 {
 	struct xsk_socket_config xsk_cfg;
 	struct xsk_if_socket *xsk_if;
@@ -362,9 +363,20 @@ static int xsk_configure_socket(struct xsk_socket_info *xsk_info, int ifidx,
 		goto error_exit;
 
 	if (custom_xsk) {
-		ret = xsk_socket__update_xskmap(xsk_if->xsk, xsk_map_fd);
-		if (ret)
+		/* IMPORTANT: do NOT use xsk_socket__update_xskmap() — it inserts
+		 * the socket fd at index = queue_id, which collides across NICs
+		 * when each NIC has only one queue. We key the map by kernel
+		 * ifindex instead, matching what afxdp_kern.c looks up via
+		 * ctx->ingress_ifindex. */
+		__u32 key = (__u32)kernel_ifindex;
+		int xsk_fd = xsk_socket__fd(xsk_if->xsk);
+		ret = bpf_map_update_elem(xsk_map_fd, &key, &xsk_fd, BPF_ANY);
+		if (ret) {
+			fprintf(stderr,
+				"ERROR: bpf_map_update_elem(xsks_map[%u]=%d) failed: %s\n",
+				key, xsk_fd, strerror(-ret));
 			goto error_exit;
+		}
 	}
 
 	fprintf(stderr, "AFXDP: Socket created.\n");
@@ -451,15 +463,21 @@ void afxdp_init_handle(struct mtcp_thread_context *ctxt){
 		xsk_ring_prod__submit(&xsk_info->umem->fq, fq_descs);
 	}
 
-	/* Create one socket per configured interface for this core(queue) */
+	/* Create one socket per configured interface for this core(queue).
+	 * Each socket is registered into xsks_map at key = kernel ifindex
+	 * (NOT queue_id) so that multiple NICs each with their own queue 0
+	 * don't all collide on xsks_map[0]. See afxdp_kern.c which looks
+	 * the socket up via ctx->ingress_ifindex. */
 	bool first_on_umem = true;
 	for (int ifidx = 0; ifidx < num_devices_attached; ifidx++) {
 		const char *ifname = CONFIG.eths[ifidx].dev_name;
+		const int kifindex = devices_attached[ifidx];
 		if (ifname == NULL || ifname[0] == '\0')
 			continue;
 
 		if (xsk_configure_socket(xsk_info, ifidx, ifname,
-					 (uint32_t)ctxt->cpu, first_on_umem) != 0) {
+					 (uint32_t)ctxt->cpu, kifindex,
+					 first_on_umem) != 0) {
 			fprintf(stderr, "ERROR: Can't setup AF_XDP socket on iface '%s' q=%d: \"%s\"\n",
 				ifname, ctxt->cpu, strerror(errno));
 			exit(EXIT_FAILURE);
@@ -467,9 +485,9 @@ void afxdp_init_handle(struct mtcp_thread_context *ctxt){
 
 		fprintf(stderr,
 			"AFXDP: cpu=%d bound xsk on iface '%s' (eidx=%d) queue_id=%u "
-			"first_on_umem=%d -> xsks_map[%u] = xsk_fd=%d\n",
+			"first_on_umem=%d -> xsks_map[ifindex=%d] = xsk_fd=%d\n",
 			ctxt->cpu, ifname, ifidx, (uint32_t)ctxt->cpu,
-			first_on_umem ? 1 : 0, (uint32_t)ctxt->cpu,
+			first_on_umem ? 1 : 0, kifindex,
 			xsk_socket__fd(xsk_info->sock[ifidx].xsk));
 
 		first_on_umem = false;
