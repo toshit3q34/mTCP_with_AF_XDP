@@ -32,7 +32,6 @@
 /* for logging */
 #include "debug.h"
 /* for num_devices_* */
-#include "config.h"
 
 #define NUM_FRAMES     16384   // critical: shared across all interfaces
 
