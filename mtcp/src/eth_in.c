@@ -6,12 +6,25 @@
 
 /*----------------------------------------------------------------------------*/
 int
-ProcessPacket(mtcp_manager_t mtcp, const int ifidx, 
+ProcessPacket(mtcp_manager_t mtcp, const int ifidx,
 		uint32_t cur_ts, unsigned char *pkt_data, int len)
 {
 	struct ethhdr *ethh = (struct ethhdr *)pkt_data;
 	u_short ip_proto = ntohs(ethh->h_proto);
 	int ret;
+
+	/* Diagnostic counter — buckets seen ethertypes per ifidx so we can
+	 * tell whether ARP/IPv4/other packets are reaching the TCP stack.
+	 * Rate-limited to first 32 packets total. */
+	{
+		static __thread uint64_t printed = 0;
+		if (printed < 32) {
+			printed++;
+			fprintf(stderr,
+				"ProcessPacket: ifidx=%d len=%d ethertype=0x%04x\n",
+				ifidx, len, ip_proto);
+		}
+	}
 
 #ifdef PKTDUMP
 	DumpPacket(mtcp, (char *)pkt_data, len, "IN", ifidx);

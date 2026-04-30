@@ -1,4 +1,6 @@
 #include <string.h>
+#include <stdio.h>
+#include <stdint.h>
 #include <netinet/ip.h>
 
 #include "ip_in.h"
@@ -38,9 +40,23 @@ ProcessIPv4Packet(mtcp_manager_t mtcp, uint32_t cur_ts,
 
 #if !PROMISCUOUS_MODE
 	/* if not promiscuous mode, drop if the destination is not myself */
-	if (iph->daddr != CONFIG.eths[ifidx].ip_addr)
+	if (iph->daddr != CONFIG.eths[ifidx].ip_addr) {
+		/* Diagnostic for the silent drop case — most common reason
+		 * packets surface in recv_pkts but never reach the TCP stack.
+		 * Rate-limited to first 16 drops. */
+		static __thread uint64_t dropped = 0;
+		if (dropped < 16) {
+			dropped++;
+			uint8_t *d = (uint8_t *)&iph->daddr;
+			uint8_t *m = (uint8_t *)&CONFIG.eths[ifidx].ip_addr;
+			fprintf(stderr,
+				"ip_in: DROP ifidx=%d daddr=%u.%u.%u.%u != my_ip=%u.%u.%u.%u proto=%u\n",
+				ifidx, d[0], d[1], d[2], d[3], m[0], m[1], m[2], m[3],
+				iph->protocol);
+		}
 		//DumpIPPacketToFile(stderr, iph, ip_len);
 		return TRUE;
+	}
 #endif
 
 	// see if the version is correct

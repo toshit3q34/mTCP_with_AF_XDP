@@ -595,11 +595,37 @@ uint8_t * afxdp_get_rptr(struct mtcp_thread_context *ctxt, int ifidx, int index,
 		return NULL;
 	}
 
-	if (len)
-		*len = (uint16_t)xsk_info->rx_batch[ifidx].len[index];
+	uint64_t addr = xsk_info->rx_batch[ifidx].addr[index];
+	uint32_t plen = xsk_info->rx_batch[ifidx].len[index];
 
-	return (uint8_t *)xsk_umem__get_data(xsk_info->umem->buffer,
-					     xsk_info->rx_batch[ifidx].addr[index]);
+	if (len)
+		*len = (uint16_t)plen;
+
+	uint8_t *p = (uint8_t *)xsk_umem__get_data(xsk_info->umem->buffer, addr);
+
+	/* Diagnostic: dump the first 14 bytes (ethernet header) so we can
+	 * confirm this is a sane frame, not a stale/garbage UMEM offset.
+	 * If you see all zeros or junk, the addr-to-pointer translation is
+	 * wrong. If you see a sane MAC + EtherType, the frame is good and
+	 * the bug is downstream (in ProcessPacket / TCP stack).
+	 * Rate-limited to first 32 packets so stderr isn't flooded. */
+	{
+		static __thread uint64_t printed = 0;
+		if (printed < 32 && plen >= 14) {
+			printed++;
+			fprintf(stderr,
+				"AFXDP: get_rptr ifidx=%d idx=%d addr=0x%lx len=%u "
+				"dst=%02x:%02x:%02x:%02x:%02x:%02x "
+				"src=%02x:%02x:%02x:%02x:%02x:%02x "
+				"etype=0x%02x%02x\n",
+				ifidx, index, (unsigned long)addr, plen,
+				p[0], p[1], p[2], p[3], p[4], p[5],
+				p[6], p[7], p[8], p[9], p[10], p[11],
+				p[12], p[13]);
+		}
+	}
+
+	return p;
 }
 
 int32_t afxdp_recv_pkts(struct mtcp_thread_context *ctxt, int ifidx){
