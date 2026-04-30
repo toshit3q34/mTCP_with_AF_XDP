@@ -63,9 +63,24 @@ int xdp_sock_prog(struct xdp_md *ctx)
     if ((void *)(eth + 1) > data_end)
         return XDP_PASS;
 
-    /* 2. Always let ARP through to the kernel. */
-    if (eth->h_proto == bpf_htons(ETH_P_ARP))
+    /* 2. ARP handling is interface-dependent.
+     *    - If this iface has an AF_XDP socket bound (i.e. mTCP owns it),
+     *      we MUST redirect ARP to mTCP. Otherwise mTCP's RequestARP()
+     *      times out forever because ARP replies go to the kernel, and
+     *      no SYN-ACK can be sent for any TCP connection.
+     *    - If mTCP doesn't own this iface (e.g. management interface),
+     *      we PASS ARP to the kernel so SSH and routing keep working.
+     *
+     *    The xsks_map lookup is used as the "does mTCP own this iface"
+     *    signal. We use the same key the redirect path below uses
+     *    (rx_queue_index here, since that's how the userspace currently
+     *    inserts) so that ownership is consistent. */
+    if (eth->h_proto == bpf_htons(ETH_P_ARP)) {
+        __u32 q = ctx->rx_queue_index;
+        if (bpf_map_lookup_elem(&xsks_map, &q))
+            return bpf_redirect_map(&xsks_map, q, XDP_PASS);
         return XDP_PASS;
+    }
 
     /* 3. For IPv4+TCP, keep SSH (port 22, either direction) on the
      *    kernel stack so remote management connections survive. */
