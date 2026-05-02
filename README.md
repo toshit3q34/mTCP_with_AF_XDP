@@ -1,4 +1,4 @@
-# mTCP + AF_XDP Backend
+# mTCP with AF_XDP
 
 This project adds an AF_XDP I/O backend to [mTCP](https://github.com/mtcp-stack/mtcp/), alongside the existing DPDK / netmap / PSIO / ONVM modules. mTCP is a user space networking stack and was also
 featured in NSDI'14.
