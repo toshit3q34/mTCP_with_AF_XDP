@@ -15,12 +15,6 @@
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
-/* libxdp's run-config / metadata helpers. Required so libxdp's
- * xdp_program__attach() recognizes this as a properly-tagged XDP
- * program; without these markers attach fails with -EINVAL even
- * though iproute2 (`ip link set xdpgeneric obj ...`) accepts it. */
-#include <xdp/xdp_helpers.h>
-#include <xdp/xsk_def_xdp_prog.h>
 
 #define BPF_PRINTK(fmt, ...)                            \
 ({                                                      \
@@ -37,14 +31,6 @@ struct {
     __uint(key_size, sizeof(__u32));
     __uint(value_size, sizeof(__u32));
 } xsks_map SEC(".maps");
-
-/* libxdp dispatcher metadata. Priority 20 matches the libxdp default
- * AF_XDP program; XDP_PASS=1 means: when no socket is in the xsks_map
- * for the rx queue, fall through to XDP_PASS instead of aborting. */
-struct {
-    __uint(priority, 20);
-    __uint(XDP_PASS, 1);
-} XDP_RUN_CONFIG(xdp_sock_prog);
 
 SEC("xdp")
 int xdp_sock_prog(struct xdp_md *ctx)
@@ -90,7 +76,3 @@ int xdp_sock_prog(struct xdp_md *ctx)
 }
 
 char _license[] SEC("license") = "GPL";
-
-/* libxdp version marker. The dispatcher uses this to verify the
- * default-AF_XDP program API version. */
-__uint(xsk_prog_version, XSK_PROG_VERSION) SEC(XDP_METADATA_SECTION);
