@@ -235,7 +235,7 @@ void afxdp_load_module(void){
 
 		/* Try SKB mode directly (best for mlx4_en) */
 		err = xdp_program__attach(prog, ifindex,
-								XDP_MODE_SKB,
+								XDP_MODE_DRV,
 								0);
 
 		if (err) {
@@ -246,7 +246,7 @@ void afxdp_load_module(void){
 			exit(EXIT_FAILURE);
 		}
 
-		attached_mode[ifidx] = XDP_MODE_SKB;
+		attached_mode[ifidx] = XDP_MODE_DRV;
 
 		fprintf(stderr,
 			"AFXDP: attached XDP (SKB mode) on iface '%s' kernel_ifindex=%d eidx=%d\n",
@@ -609,27 +609,26 @@ uint8_t * afxdp_get_rptr(struct mtcp_thread_context *ctxt, int ifidx, int index,
 	 * wrong. If you see a sane MAC + EtherType, the frame is good and
 	 * the bug is downstream (in ProcessPacket / TCP stack).
 	 * Rate-limited to first 32 packets so stderr isn't flooded. */
-	{
-		static __thread uint64_t printed = 0;
-		if (printed < 32 && plen >= 14) {
-			printed++;
-			fprintf(stderr,
-				"AFXDP: get_rptr ifidx=%d idx=%d addr=0x%lx len=%u "
-				"dst=%02x:%02x:%02x:%02x:%02x:%02x "
-				"src=%02x:%02x:%02x:%02x:%02x:%02x "
-				"etype=0x%02x%02x\n",
-				ifidx, index, (unsigned long)addr, plen,
-				p[0], p[1], p[2], p[3], p[4], p[5],
-				p[6], p[7], p[8], p[9], p[10], p[11],
-				p[12], p[13]);
-		}
-	}
+	// {
+	// 	static __thread uint64_t printed = 0;
+	// 	if (printed < 32 && plen >= 14) {
+	// 		printed++;
+	// 		fprintf(stderr,
+	// 			"AFXDP: get_rptr ifidx=%d idx=%d addr=0x%lx len=%u "
+	// 			"dst=%02x:%02x:%02x:%02x:%02x:%02x "
+	// 			"src=%02x:%02x:%02x:%02x:%02x:%02x "
+	// 			"etype=0x%02x%02x\n",
+	// 			ifidx, index, (unsigned long)addr, plen,
+	// 			p[0], p[1], p[2], p[3], p[4], p[5],
+	// 			p[6], p[7], p[8], p[9], p[10], p[11],
+	// 			p[12], p[13]);
+	// 	}
+	// }
 
 	return p;
 }
 
 int32_t afxdp_recv_pkts(struct mtcp_thread_context *ctxt, int ifidx){
-	// fprintf(stderr, "AFXDP: Want to receive packets\n");
 	struct xsk_socket_info *xsk_info = (struct xsk_socket_info *)ctxt->io_private_context;
 	struct xsk_if_socket *xsk_if;
 	uint32_t idx_rx = 0, idx_fq = 0;
@@ -673,7 +672,6 @@ int32_t afxdp_recv_pkts(struct mtcp_thread_context *ctxt, int ifidx){
 		recvfrom(xsk_socket__fd(xsk_if->xsk), NULL, 0, MSG_DONTWAIT, NULL, 0);
 
 	rcvd = xsk_ring_cons__peek(&xsk_if->rx, RX_BATCH_SIZE, &idx_rx);
-	// fprintf(stderr, "AFXDP: Number of packets received atp : %d\n", (int)rcvd);
 	if (!rcvd)
 		return 0;
 
@@ -688,18 +686,18 @@ int32_t afxdp_recv_pkts(struct mtcp_thread_context *ctxt, int ifidx){
 
 	/* One-shot debug print so you can confirm packets are surfacing to
 	 * userspace at all. Remove (or wrap in TRACE_DBG) once verified. */
-	{
-		static __thread uint64_t total_rcvd = 0;
-		static __thread uint64_t last_print = 0;
-		total_rcvd += rcvd;
-		if (total_rcvd - last_print >= 1) {
-			fprintf(stderr,
-				"AFXDP: cpu=%d ifidx=%d rcvd=%u total=%lu\n",
-				ctxt->cpu, ifidx, rcvd,
-				(unsigned long)total_rcvd);
-			last_print = total_rcvd;
-		}
-	}
+	// {
+	// 	static __thread uint64_t total_rcvd = 0;
+	// 	static __thread uint64_t last_print = 0;
+	// 	total_rcvd += rcvd;
+	// 	if (total_rcvd - last_print >= 1) {
+	// 		fprintf(stderr,
+	// 			"AFXDP: cpu=%d ifidx=%d rcvd=%u total=%lu\n",
+	// 			ctxt->cpu, ifidx, rcvd,
+	// 			(unsigned long)total_rcvd);
+	// 		last_print = total_rcvd;
+	// 	}
+	// }
 
 	return (int32_t)rcvd;
 }

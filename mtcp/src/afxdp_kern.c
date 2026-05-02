@@ -1,34 +1,16 @@
-/*
- * AF_XDP kernel-side BPF program for mTCP.
- *
- * Built with vmlinux.h (CO-RE / BTF-based). Generate vmlinux.h once via:
- *     bpftool btf dump file /sys/kernel/btf/vmlinux format c > vmlinux.h
- *
- * Compatibility contract with afxdp_module.c:
- *   - Map MUST be named "xsks_map" so that
- *         bpf_object__find_map_by_name(prog_obj, "xsks_map")
- *     in afxdp_module.c::afxdp_load_module() resolves correctly.
- *   - The XDP program MUST be in section "xdp" so libxdp's
- *     xdp_program__create() picks it up as the default program.
- *   - The map is keyed by the **kernel ifindex** of the ingress
- *     interface, NOT by rx_queue_index. afxdp_module.c inserts the
- *     AF_XDP socket fd at index = devices_attached[ifidx] (a kernel
- *     ifindex). This avoids the multi-NIC collision where every NIC's
- *     queue 0 socket would otherwise stomp on xsks_map[0].
- *   - LIMITATION: assumes 1 RX queue per NIC. Multi-queue + multi-NIC
- *     needs a composite (ifindex, queue_id) key — a future change.
- *
- * Behavior:
- *   - ARP frames -> XDP_PASS (kernel handles ARP, otherwise the box
- *     can't talk to its gateway).
- *   - IPv4 + TCP + (src or dst port 22) -> XDP_PASS (keeps SSH alive
- *     on remote test machines like CloudLab nodes).
- *   - Everything else with an AF_XDP socket bound for the matching
- *     ingress ifindex -> bpf_redirect_map() into that socket.
- *   - If no socket is bound for the ifindex (or the redirect fails for
- *     any reason), the kernel takes the packet via XDP_PASS — that's
- *     the third-arg flag to bpf_redirect_map below.
- */
+// AF_XDP kernel-side BPF program for mTCP.
+// Built with vmlinux.h (CO-RE / BTF-based). Generate vmlinux.h once via:
+// bpftool btf dump file /sys/kernel/btf/vmlinux format c > vmlinux.h
+
+// The eBPF Map xsks_map maps the queue index of the received packet
+// to the corresponding AF_XDP socket fd. This makes sure that multiple cores
+// can share the same interface through different RX queues.
+// For example :
+// Packet received on RX queue 0 => xsks_map[0] = AF_XDP socket fd used by core 0
+// Packet received on RX queue 1 => xsks_map[1] = AF_XDP socket fd used by core 1
+// The only limitation is that multiple interfaces can have same queue number
+// overwriting the map index entries.
+// Uses XDP_PASS for SSH packets to prevent interference with CloudLab (testing website).
 
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
@@ -43,8 +25,6 @@
 #define ETH_P_IP   0x0800
 #define ETH_P_ARP  0x0806
 
-/* Map keyed by kernel ifindex (NOT rx_queue_index). max_entries sized to
- * comfortably exceed any realistic ifindex on a CloudLab/test box. */
 struct {
     __uint(type, BPF_MAP_TYPE_XSKMAP);
     __uint(max_entries, 256);
@@ -59,31 +39,14 @@ int xdp_sock_prog(struct xdp_md *ctx)
     void *data     = (void *)(long)ctx->data;
     struct ethhdr *eth = data;
 
-    /* 1. Ethernet boundary check. */
+    // Ethernet boundary check.
     if ((void *)(eth + 1) > data_end)
         return XDP_PASS;
 
-    /* 2. ARP handling is interface-dependent.
-     *    - If this iface has an AF_XDP socket bound (i.e. mTCP owns it),
-     *      we MUST redirect ARP to mTCP. Otherwise mTCP's RequestARP()
-     *      times out forever because ARP replies go to the kernel, and
-     *      no SYN-ACK can be sent for any TCP connection.
-     *    - If mTCP doesn't own this iface (e.g. management interface),
-     *      we PASS ARP to the kernel so SSH and routing keep working.
-     *
-     *    The xsks_map lookup is used as the "does mTCP own this iface"
-     *    signal. We use the same key the redirect path below uses
-     *    (rx_queue_index here, since that's how the userspace currently
-     *    inserts) so that ownership is consistent. */
-    if (eth->h_proto == bpf_htons(ETH_P_ARP)) {
-        __u32 q = ctx->rx_queue_index;
-        if (bpf_map_lookup_elem(&xsks_map, &q))
-            return bpf_redirect_map(&xsks_map, q, XDP_PASS);
-        return XDP_PASS;
-    }
-
-    /* 3. For IPv4+TCP, keep SSH (port 22, either direction) on the
-     *    kernel stack so remote management connections survive. */
+    // Specifically catching SSH to avoid any connection loss
+	// from the remote server.
+	// IPv4 + TCP + (src or dst port 22) -> XDP_PASS (keeps SSH alive
+	// on remote test machines like CloudLab nodes).
     if (eth->h_proto == bpf_htons(ETH_P_IP)) {
         struct iphdr *ip = (void *)(eth + 1);
         if ((void *)(ip + 1) > data_end)
@@ -101,19 +64,8 @@ int xdp_sock_prog(struct xdp_md *ctx)
         }
     }
 
-    /* 4. Redirect everything else to the AF_XDP socket bound for this
-     *    ingress interface. If the slot isn't populated, fall back to
-     *    XDP_PASS (third arg to bpf_redirect_map) so the kernel handles
-     *    it instead of the packet being dropped (XDP_ABORTED).
-     *
-     *    Keying on ingress_ifindex (instead of rx_queue_index) avoids
-     *    the multi-NIC collision: when several NICs each have an
-     *    AF_XDP socket bound to their queue 0, they would otherwise
-     *    all stomp on xsks_map[0] in userspace, and the kernel's
-     *    xsk_rcv_check() would drop redirects whose target socket is
-     *    bound to a different netdev. With this scheme each NIC's
-     *    socket lives at xsks_map[kernel_ifindex] and userspace
-     *    inserts to the matching slot. */
+    // Redirect everything to their corresponding slot
+	// xsk_map[receive_queue_index] => xsk_socket_fd
     __u32 index = ctx->rx_queue_index;
     if (bpf_map_lookup_elem(&xsks_map, &index)){
     	BPF_PRINTK("Interface index: %d\n", index);
