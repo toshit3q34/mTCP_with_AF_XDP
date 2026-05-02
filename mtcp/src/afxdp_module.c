@@ -224,10 +224,13 @@ void afxdp_load_module(void){
 	for (int ifidx = 0; ifidx < num_devices_attached; ifidx++) {
 		const int ifindex  = devices_attached[ifidx];
 		const char *ifname = CONFIG.eths[ifidx].dev_name;
-		if(ifindex != 3){
+		/* Only attach on interfaces actually present in the config file.
+		 * SetNetEnv() populates CONFIG.eths[].dev_name only for ifaces
+		 * matched by `dev_name_list` (i.e. -i / `port = ...` in mtcp.conf),
+		 * so an empty dev_name means this slot wasn't requested. */
+		if (ifname == NULL || ifname[0] == '\0') {
 			continue;
 		}
-		printf("HERE\n");
 		attached_mode[ifidx] = 0;
 
 		if (ifindex <= 0)
@@ -475,9 +478,10 @@ void afxdp_init_handle(struct mtcp_thread_context *ctxt){
 	for (int ifidx = 0; ifidx < MAX_DEVICES; ifidx++) {
 		const char *ifname = CONFIG.eths[ifidx].dev_name;
 		const int kifindex = devices_attached[ifidx];
-		if(kifindex != 3){
-			continue;
-		}
+		/* Only bind xsks for interfaces actually mentioned in the
+		 * config file. CONFIG.eths[].dev_name is populated only for
+		 * ifaces matched by `dev_name_list` (-i / `port = ...`), so
+		 * an empty dev_name means the slot is unused. */
 		if (ifname == NULL || ifname[0] == '\0')
 			continue;
 
