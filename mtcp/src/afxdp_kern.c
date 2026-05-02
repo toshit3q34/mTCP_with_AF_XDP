@@ -71,6 +71,9 @@ int xdp_sock_prog(struct xdp_md *ctx)
     	BPF_PRINTK("Interface index: %d\n", index);
         return bpf_redirect_map(&xsks_map, index, XDP_PASS);
 	}
+    else{
+        BPF_PRINTK("Failed to map: %d\n", index);
+    }
 
     return XDP_PASS;
 }
