@@ -235,7 +235,7 @@ void afxdp_load_module(void){
 
 		/* Try SKB mode directly (best for mlx4_en) */
 		err = xdp_program__attach(prog, ifindex,
-								XDP_MODE_DRV,
+								XDP_MODE_NATIVE,
 								0);
 
 		if (err) {
@@ -246,7 +246,7 @@ void afxdp_load_module(void){
 			exit(EXIT_FAILURE);
 		}
 
-		attached_mode[ifidx] = XDP_MODE_DRV;
+		attached_mode[ifidx] = XDP_MODE_NATIVE;
 
 		fprintf(stderr,
 			"AFXDP: attached XDP (SKB mode) on iface '%s' kernel_ifindex=%d eidx=%d\n",
