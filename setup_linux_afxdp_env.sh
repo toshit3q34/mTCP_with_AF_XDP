@@ -48,6 +48,15 @@ if ! grep -q "pam_limits.so" /etc/pam.d/common-session-noninteractive; then
 echo "session required pam_limits.so" | sudo tee -a /etc/pam.d/common-session-noninteractive
 fi
 
+echo "== Cloning mTCP repository =="
+git clone https://github.com/toshit3q34/mTCP_with_AF_XDP mtcp
+
+echo "== Making vmlinux.h =="
+cd mtcp/mtcp/src/
+bpftool btf dump file /sys/kernel/btf/vmlinux format c > vmlinux.h
+cd
+
 echo "=== Done ==="
+echo "mTCP code ready to build & run in ~/mtcp"
 echo "IMPORTANT: Reboot or relogin for memlock changes:"
 echo " sudo reboot"
