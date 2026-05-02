@@ -15,12 +15,15 @@
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
-/* libxdp's run-config / metadata helpers. Required so libxdp's
- * xdp_program__attach() recognizes this as a properly-tagged XDP
- * program; without these markers attach fails with -EINVAL even
- * though iproute2 (`ip link set xdpgeneric obj ...`) accepts it. */
-#include <xdp/xdp_helpers.h>
-#include <xdp/xsk_def_xdp_prog.h>
+
+/* Inlined libxdp markers so this BPF program doesn't need
+ * <xdp/xdp_helpers.h> / <xdp/xsk_def_xdp_prog.h> at compile time.
+ * libxdp recognizes a program as a properly-tagged XSK default program
+ * by the section names produced below. Keep these literal strings/values
+ * in sync with libxdp upstream (they have been stable since libxdp 1.0). */
+#define XSK_PROG_VERSION       1
+#define XDP_METADATA_SECTION   "xdp_metadata"
+#define XDP_RUN_CONFIG(f)      SEC("xdp_run_config/" #f)
 
 #define BPF_PRINTK(fmt, ...)                            \
 ({                                                      \
