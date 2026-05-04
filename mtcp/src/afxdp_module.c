@@ -73,11 +73,14 @@ static bool custom_xsk = false;
 static int xsk_map_fd;
 static int err;
 static char errmsg[1024];
-static int xdp_cleaned = 0;
 
 /* Per-iface XDP attach mode, recorded at attach time so cleanup can
  * detach with the same mode. XDP_MODE_UNSPEC (= 0) means "not attached". */
 static enum xdp_attach_mode attached_mode[MAX_DEVICES];
+
+/* Forward decl so afxdp_load_module() can register it with atexit().
+ * Definition lives near the per-thread teardown code below. */
+static void afxdp_prog_cleanup(void);
 
 /* Enable promiscuous mode on `ifname` so AF_XDP can see all frames,
  * not just those addressed to the iface MAC. Returns 0 on success or
@@ -179,15 +182,6 @@ static inline void complete_tx(struct xsk_socket_info *xsk)
 
 void afxdp_load_module(void){
 	const char *kern_path = afxdp_resolve_kern_path();
-
-	/* Skip libxdp's multi-prog dispatcher *before* xdp_program__create —
-	 * this env var is consulted at create/attach time. If we set it later,
-	 * libxdp may wrap our program in the dispatcher, which leaves us with
-	 * a dispatcher attached on the netdev and our program running as a
-	 * sub-program. In that case bpf_object__find_map_by_name() can resolve
-	 * to a different xsks_map than the one the running program actually
-	 * uses, so xsk_socket__update_xskmap() updates the wrong map and the
-	 * redirect lands in a socket nobody is polling. */
 	setenv("LIBXDP_SKIP_DISPATCHER", "1", 1);
 
 	DECLARE_LIBXDP_OPTS(xdp_program_opts, xdp_opts, .open_filename = kern_path,);
@@ -283,6 +277,12 @@ void afxdp_load_module(void){
     fprintf(stderr, "AFXDP: xsks_map resolved (fd=%d). Sockets will be inserted "
                     "via xsk_socket__update_xskmap at queue_id=ctxt->cpu.\n",
             xsk_map_fd);
+
+    if (atexit(afxdp_prog_cleanup) != 0) {
+        fprintf(stderr,
+            "WARN: atexit(afxdp_prog_cleanup) registration failed; "
+            "XDP program will leak on exit.\n");
+    }
 }
 
 static struct xsk_umem_info *configure_xsk_umem(void *buffer, uint64_t size)
@@ -725,7 +725,26 @@ static void afxdp_prog_cleanup(void)
 		if (attached_mode[ifidx] == XDP_MODE_UNSPEC)
 			continue;       /* never attached on this iface */
 
-		xdp_program__detach(prog, ifindex, attached_mode[ifidx], 0);
+		int rc = xdp_program__detach(prog, ifindex,
+					     attached_mode[ifidx], 0);
+		if (rc) {
+			/* Surface the failure — silent detach errors are why
+			 * users end up running `ip link set dev <if> xdp off`
+			 * by hand. Common causes: program already gone (race
+			 * with another cleanup path → harmless), or netlink
+			 * busy because the netdev was torn down underneath us. */
+			char ebuf[256];
+			libxdp_strerror(rc, ebuf, sizeof(ebuf));
+			fprintf(stderr,
+				"WARN: XDP detach failed on kernel_ifindex=%d "
+				"(mode=%d): %s (%d). If the program is still "
+				"attached, run: ip link set dev <iface> xdp off\n",
+				ifindex, (int)attached_mode[ifidx], ebuf, rc);
+		} else {
+			fprintf(stderr,
+				"AFXDP: detached XDP from kernel_ifindex=%d\n",
+				ifindex);
+		}
 		attached_mode[ifidx] = XDP_MODE_UNSPEC;
 	}
 
@@ -754,10 +773,6 @@ afxdp_destroy_handle(struct mtcp_thread_context *ctxt){
 
 	free(xsk_info);
 	ctxt->io_private_context = NULL;
-
-	if (__sync_bool_compare_and_swap(&xdp_cleaned, 0, 1)) {
-		afxdp_prog_cleanup();
-	}
 }
 
 int32_t
