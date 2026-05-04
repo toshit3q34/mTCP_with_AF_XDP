@@ -852,6 +852,7 @@ main(int argc, char **argv)
 		if (process_cpu != -1)
 			break;
 	}
+	PrintStats();
 
 	for (i = ((process_cpu == -1) ? 0 : process_cpu); i < core_limit; i++) {
 		pthread_join(app_thread[i], NULL);

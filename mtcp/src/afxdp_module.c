@@ -246,7 +246,7 @@ void afxdp_load_module(void){
 		attached_mode[ifidx] = XDP_MODE_NATIVE;
 
 		fprintf(stderr,
-			"AFXDP: attached XDP (SKB mode) on iface '%s' kernel_ifindex=%d eidx=%d\n",
+			"AFXDP: attached XDP (NATIVE mode) on iface '%s' kernel_ifindex=%d eidx=%d\n",
 			ifname ? ifname : "?", ifindex, ifidx);
 
 		/* Promiscuous mode */
