@@ -37,7 +37,7 @@
 /* for num_devices_* */
 #include "config.h"
 
-#define NUM_FRAMES     16384   // critical: shared across all interfaces
+#define NUM_FRAMES     16384   // shared across all interfaces
 
 #define FRAME_SIZE     XSK_UMEM__DEFAULT_FRAME_SIZE
 
@@ -52,14 +52,12 @@
 // MAX_DEVICES -> MAX interfaces
 #define INVALID_UMEM_FRAME UINT64_MAX
 
-/* Default install location of the BPF kernel object. The build system
- * may override this with -DAFXDP_KERN_PATH="..." to bake in an absolute
- * path. At runtime, the AFXDP_KERN_PATH env var (if set & non-empty)
- * takes precedence over the compile-time default. */
+// Define Kernel path for the meantime. Reset later
 #ifndef AFXDP_KERN_PATH
 #define AFXDP_KERN_PATH "afxdp_kern.o"
 #endif
 
+// Resolve afxdp_kern.o in whole repository
 static const char *afxdp_resolve_kern_path(void)
 {
 	const char *p = getenv("AFXDP_KERN_PATH");
@@ -74,17 +72,13 @@ static int xsk_map_fd;
 static int err;
 static char errmsg[1024];
 
-/* Per-iface XDP attach mode, recorded at attach time so cleanup can
- * detach with the same mode. XDP_MODE_UNSPEC (= 0) means "not attached". */
+// Per-interface XDP attach mode
 static enum xdp_attach_mode attached_mode[MAX_DEVICES];
 
-/* Forward decl so afxdp_load_module() can register it with atexit().
- * Definition lives near the per-thread teardown code below. */
+// Forward declaration for atexit(). Dettaches kernel file from NIC
 static void afxdp_prog_cleanup(void);
 
-/* Enable promiscuous mode on `ifname` so AF_XDP can see all frames,
- * not just those addressed to the iface MAC. Returns 0 on success or
- * if promisc was already on. Returns -1 on failure (errno set). */
+// Set promiscous mode -> DPDK works in this mode only.
 static int afxdp_set_promisc(const char *ifname)
 {
 	struct ifreq ifr;
@@ -104,7 +98,7 @@ static int afxdp_set_promisc(const char *ifname)
 	}
 
 	if (ifr.ifr_flags & IFF_PROMISC) {
-		rc = 0;     /* already promiscuous */
+		rc = 0;     // already promiscuous
 		goto out;
 	}
 
@@ -119,6 +113,7 @@ out:
 	return rc;
 }
 
+// Struct for binded umem, fq & cq.
 struct xsk_umem_info {
 	struct xsk_ring_prod fq;
 	struct xsk_ring_cons cq;
@@ -126,17 +121,24 @@ struct xsk_umem_info {
 	void *buffer;
 };
 
+// Per socket struct. Each socket has one rx & tx
+// along with xsk socket fd.
 struct xsk_if_socket {
 	struct xsk_socket    *xsk;
 	struct xsk_ring_prod  tx;
 	struct xsk_ring_cons  rx;
 };
 
+// Per core struct. One core will have one umem, one fq, one cq
+// Multiple sockets on the same core share the same umem, fq & cq.
+// The rx_batch and tx_batch member structs are used for batching send and rcv
+// packets. outstanding_tx represents the current (sent frames - completed) per core
+// 64 bit aligned.
 struct xsk_socket_info {
 	struct xsk_umem_info	*umem;
 	struct xsk_if_socket	sock[MAX_DEVICES];
-	void			*umem_area;			/* replaces rte_mempool */
-	uint64_t		umem_frame_addr[NUM_FRAMES];	/* replaces m_table */
+	void			*umem_area;
+	uint64_t		umem_frame_addr[NUM_FRAMES];
 	uint32_t		umem_frame_free;
 	uint32_t		outstanding_tx;
 	struct {
@@ -151,35 +153,13 @@ struct xsk_socket_info {
 	} tx_batch[MAX_DEVICES];
 } __attribute__((aligned(64)));
 
-static inline void xsk_free_umem_frame(struct xsk_socket_info *xsk, uint64_t addr)
-{
-	if (xsk->umem_frame_free >= NUM_FRAMES)
-		return;
-	xsk->umem_frame_addr[xsk->umem_frame_free++] = addr;
-}
-
-static inline void complete_tx(struct xsk_socket_info *xsk)
-{
-	uint32_t idx_cq = 0;
-	uint32_t i;
-	uint32_t completed = xsk_ring_cons__peek(&xsk->umem->cq, TX_BATCH_SIZE, &idx_cq);
-
-	if (!completed)
-		return;
-
-	for (i = 0; i < completed; i++) {
-		uint64_t addr = *xsk_ring_cons__comp_addr(&xsk->umem->cq, idx_cq + i);
-		xsk_free_umem_frame(xsk, addr);
-	}
-
-	xsk_ring_cons__release(&xsk->umem->cq, completed);
-
-	if (xsk->outstanding_tx >= completed)
-		xsk->outstanding_tx -= completed;
-	else
-		xsk->outstanding_tx = 0;
-}
-
+// Called one time globally while mTCP init. Does the following things :
+// 1. Makes the program file out of afxdp_kern.o
+// 2. Iterate through all the interfaces in CONFIG & attaches the 
+// 	  eBPF XDP kernel file to the NIC in NATIVE mode 
+// 3. Sets attached_mode[ifidx] = XDP_MODE_NATIVE
+// 4. Gets back the shared eBPF Map fd for setting up AF_XDP sockets
+// 5. Calls cleanup atexit()
 void afxdp_load_module(void){
 	const char *kern_path = afxdp_resolve_kern_path();
 	setenv("LIBXDP_SKIP_DISPATCHER", "1", 1);
@@ -202,26 +182,13 @@ void afxdp_load_module(void){
     err = bpf_object__load(obj);
     if (err) {
         fprintf(stderr, "ERROR: Kernel rejected BPF object: %s\n", strerror(-err));
-        /* Hint: If this fails, run 'sudo dmesg' to see the verifier log */
         exit(EXIT_FAILURE);
     }
 
-	/* Attach the program on all configured interfaces. Try native (driver)
-	 * mode first for best performance; fall back to SKB (generic) mode if
-	 * the driver doesn't support native XDP. Bail hard if both fail —
-	 * mTCP can't function without an attached program.
-	 *
-	 * Note: devices_attached[ifidx] is the real Linux kernel ifindex
-	 * (populated by SetNetEnv via if_nametoindex). CONFIG.eths[ifidx].ifindex
-	 * is mTCP's internal small port number — different thing, do not pass
-	 * it to xdp_program__attach(). */
+	// Attach the program on all configured cores.
 	for (int ifidx = 0; ifidx < num_devices_attached; ifidx++) {
 		const int ifindex  = devices_attached[ifidx];
 		const char *ifname = CONFIG.eths[ifidx].dev_name;
-		/* Only attach on interfaces actually present in the config file.
-		 * SetNetEnv() populates CONFIG.eths[].dev_name only for ifaces
-		 * matched by `dev_name_list` (i.e. -i / `port = ...` in mtcp.conf),
-		 * so an empty dev_name means this slot wasn't requested. */
 		if (ifname == NULL || ifname[0] == '\0') {
 			continue;
 		}
@@ -230,7 +197,6 @@ void afxdp_load_module(void){
 		if (ifindex <= 0)
 			continue;
 
-		/* Try SKB mode directly (best for mlx4_en) */
 		err = xdp_program__attach(prog, ifindex,
 								XDP_MODE_NATIVE,
 								0);
@@ -259,7 +225,6 @@ void afxdp_load_module(void){
 		}
 	}
 
-    // Use the more efficient find_map_by_name instead of a manual loop
     struct bpf_map *map = bpf_object__find_map_by_name(obj, "xsks_map");
 
     if (!map) {
@@ -269,7 +234,6 @@ void afxdp_load_module(void){
 
     xsk_map_fd = bpf_map__fd(map);
     if (xsk_map_fd < 0) {
-        // If it's still < 0 here, the load itself failed (check dmesg)
         fprintf(stderr, "ERROR: xsks_map fd is invalid (%d). Is the program loaded?\n", xsk_map_fd);
         exit(EXIT_FAILURE);
     }
@@ -278,6 +242,7 @@ void afxdp_load_module(void){
                     "via xsk_socket__update_xskmap at queue_id=ctxt->cpu.\n",
             xsk_map_fd);
 
+	// Cleanup function called when program exits
     if (atexit(afxdp_prog_cleanup) != 0) {
         fprintf(stderr,
             "WARN: atexit(afxdp_prog_cleanup) registration failed; "
@@ -285,6 +250,7 @@ void afxdp_load_module(void){
     }
 }
 
+// Helper function. Allocates the memory for UMEM. Called only once per core
 static struct xsk_umem_info *configure_xsk_umem(void *buffer, uint64_t size)
 {
 	struct xsk_umem_info *umem;
@@ -314,6 +280,16 @@ static struct xsk_umem_info *configure_xsk_umem(void *buffer, uint64_t size)
 	return umem;
 }
 
+// Helper function. Frees the occupied frame in umem. Can be used by fq in the next run.
+static inline void xsk_free_umem_frame(struct xsk_socket_info *xsk, uint64_t addr)
+{
+	if (xsk->umem_frame_free >= NUM_FRAMES)
+		return;
+	xsk->umem_frame_addr[xsk->umem_frame_free++] = addr;
+}
+
+// Helper function. Allocates frames to UMEM before startup.
+// Used to pre-fill the fq.
 static uint64_t xsk_alloc_umem_frame(struct xsk_socket_info *xsk)
 {
 	uint64_t frame;
@@ -325,6 +301,10 @@ static uint64_t xsk_alloc_umem_frame(struct xsk_socket_info *xsk)
 	return frame;
 }
 
+// Helper function. Configures AF_XDP sockets. Does the following:
+// 1. Sets flags for the sockets
+// 2. If first on the core then UMEM is passed directly otherwise shared is used.
+// 3. Bind the map[queue_idx] = socket_fd.
 static int xsk_configure_socket(struct xsk_socket_info *xsk_info, int ifidx,
 				const char *ifname, uint32_t queue_id,
 				int kernel_ifindex, bool first_on_umem)
@@ -343,21 +323,15 @@ static int xsk_configure_socket(struct xsk_socket_info *xsk_info, int ifidx,
 	xsk_cfg.rx_size      = RX_RING_SIZE;
 	xsk_cfg.tx_size      = TX_RING_SIZE;
 	xsk_cfg.xdp_flags    = 0;
-	/* XDP_USE_NEED_WAKEUP lets the kernel signal when it needs userspace
-	 * to wake it (cheap when idle, required on some drivers in SKB+COPY
-	 * mode for timely RX). We must respect xsk_ring_prod__needs_wakeup()
-	 * on the FQ in the recv path below, otherwise we can stall waiting
-	 * for the kernel to fill an RX descriptor that it'll only fill after
-	 * we kick it. */
 	xsk_cfg.bind_flags   = XDP_USE_NEED_WAKEUP;
 	xsk_cfg.libbpf_flags = custom_xsk ? XSK_LIBBPF_FLAGS__INHIBIT_PROG_LOAD : 0;
 	if (first_on_umem) {
-		/* First socket on this UMEM: standard create */
+		// First socket using standard UMEM
 		ret = xsk_socket__create(&xsk_if->xsk, ifname, queue_id,
 					 xsk_info->umem->umem,
 					 &xsk_if->rx, &xsk_if->tx, &xsk_cfg);
 	} else {
-		/* Subsequent socket: must use _shared and pass the UMEM's FQ/CQ */
+		// Subsequent using shared UMEM, fq and cq.
 		ret = xsk_socket__create_shared(&xsk_if->xsk, ifname, queue_id,
 						xsk_info->umem->umem,
 						&xsk_if->rx, &xsk_if->tx,
@@ -369,11 +343,6 @@ static int xsk_configure_socket(struct xsk_socket_info *xsk_info, int ifidx,
 		goto error_exit;
 
 	if (custom_xsk) {
-		/* IMPORTANT: do NOT use xsk_socket__update_xskmap() — it inserts
-		 * the socket fd at index = queue_id, which collides across NICs
-		 * when each NIC has only one queue. We key the map by kernel
-		 * ifindex instead, matching what afxdp_kern.c looks up via
-		 * ctx->ingress_ifindex. */
 		__u32 key = (__u32)queue_id;
 		int xsk_fd = xsk_socket__fd(xsk_if->xsk);
 		ret = bpf_map_update_elem(xsk_map_fd, &key, &xsk_fd, BPF_ANY);
@@ -394,12 +363,12 @@ error_exit:
 	return -1;
 }
 
+// Runs on every mTCP thread. Does the following:
+// 1. Call configure_xsk_umem to make UMEM for the core.
+// 2. Allocates frames for the whole UMEM.
+// 3. Pre-fill the fq.
+// 4. Create one socket per configured interface.
 void afxdp_init_handle(struct mtcp_thread_context *ctxt){
-
-	/* Allow unlimited locking of memory so the UMEM allocation
-	 * can be pinned. Required on kernels < 5.11 (and on 5.11+
-	 * when CONFIG_MEMCG is not in effect). Idempotent across
-	 * threads, so calling it per-init is harmless. */
 	struct rlimit rlim = { RLIM_INFINITY, RLIM_INFINITY };
 	if (setrlimit(RLIMIT_MEMLOCK, &rlim)) {
 		fprintf(stderr, "ERROR: setrlimit(RLIMIT_MEMLOCK) \"%s\"\n",
@@ -407,7 +376,7 @@ void afxdp_init_handle(struct mtcp_thread_context *ctxt){
 		exit(EXIT_FAILURE);
 	}
 
-	/* Allocate memory for NUM_FRAMES of the default XDP frame size */
+	// Allocate memory for NUM_FRAMES of the default XDP frame size
 	uint64_t packet_buffer_size = NUM_FRAMES * FRAME_SIZE;
 	void *packet_buffer;
 	if (posix_memalign(&packet_buffer,
@@ -442,12 +411,12 @@ void afxdp_init_handle(struct mtcp_thread_context *ctxt){
 		exit(EXIT_FAILURE);
 	}
 
-	/* Initialize umem frame allocation */
+	// Initial frame allocation
 	for (uint32_t i = 0; i < NUM_FRAMES; i++)
 		xsk_info->umem_frame_addr[i] = (uint64_t)i * FRAME_SIZE;
 	xsk_info->umem_frame_free = NUM_FRAMES;
 
-	/* Pre-fill the shared UMEM fill queue once */
+	// Pre-fill the shared fq.
 	{
 		uint32_t idx_fq = 0;
 		const uint32_t fq_descs = FQ_RING_SIZE;
@@ -469,19 +438,11 @@ void afxdp_init_handle(struct mtcp_thread_context *ctxt){
 		xsk_ring_prod__submit(&xsk_info->umem->fq, fq_descs);
 	}
 
-	/* Create one socket per configured interface for this core(queue).
-	 * Each socket is registered into xsks_map at key = kernel ifindex
-	 * (NOT queue_id) so that multiple NICs each with their own queue 0
-	 * don't all collide on xsks_map[0]. See afxdp_kern.c which looks
-	 * the socket up via ctx->ingress_ifindex. */
+	// Create one socket per configured interface.
 	bool first_on_umem = true;
 	for (int ifidx = 0; ifidx < MAX_DEVICES; ifidx++) {
 		const char *ifname = CONFIG.eths[ifidx].dev_name;
 		const int kifindex = devices_attached[ifidx];
-		/* Only bind xsks for interfaces actually mentioned in the
-		 * config file. CONFIG.eths[].dev_name is populated only for
-		 * ifaces matched by `dev_name_list` (-i / `port = ...`), so
-		 * an empty dev_name means the slot is unused. */
 		if (ifname == NULL || ifname[0] == '\0')
 			continue;
 
@@ -515,6 +476,31 @@ void afxdp_release_pkt(struct mtcp_thread_context *ctxt, int ifidx, unsigned cha
 	 */
 }
 
+// Helper function. Frees the frames from cq before more send. 
+// Also sets the outstanding_tx for the core accordingly.
+static inline void complete_tx(struct xsk_socket_info *xsk)
+{
+	uint32_t idx_cq = 0;
+	uint32_t i;
+	uint32_t completed = xsk_ring_cons__peek(&xsk->umem->cq, TX_BATCH_SIZE, &idx_cq);
+
+	if (!completed)
+		return;
+
+	for (i = 0; i < completed; i++) {
+		uint64_t addr = *xsk_ring_cons__comp_addr(&xsk->umem->cq, idx_cq + i);
+		xsk_free_umem_frame(xsk, addr);
+	}
+
+	xsk_ring_cons__release(&xsk->umem->cq, completed);
+
+	if (xsk->outstanding_tx >= completed)
+		xsk->outstanding_tx -= completed;
+	else
+		xsk->outstanding_tx = 0;
+}
+
+// Gets a free UMEM frame to write on. Passes the pointer to mTCP core.
 uint8_t * afxdp_get_wptr(struct mtcp_thread_context *ctxt, int ifidx, uint16_t len){
 	struct xsk_socket_info *xsk_info = (struct xsk_socket_info *)ctxt->io_private_context;
 	struct xsk_if_socket *xsk_if;
@@ -541,6 +527,10 @@ uint8_t * afxdp_get_wptr(struct mtcp_thread_context *ctxt, int ifidx, uint16_t l
 	return (uint8_t *)xsk_umem__get_data(xsk_info->umem->buffer, addr);
 }
 
+// Sends packets batchwise. Does the following:
+// 1. Reclaim completed TX frames back to free list
+// 2. See the current batch (tx_batch[nif].cnt). This was updated during wptr.
+// 3. Submit all the frames who have data written on them to tx.
 int32_t afxdp_send_pkts(struct mtcp_thread_context *ctxt, int nif){
 	struct xsk_socket_info *xsk_info = (struct xsk_socket_info *)ctxt->io_private_context;
 	struct xsk_if_socket *xsk_if;
@@ -556,7 +546,7 @@ int32_t afxdp_send_pkts(struct mtcp_thread_context *ctxt, int nif){
 	if (!xsk_if->xsk)
 		return 0;
 
-	/* Reclaim completed TX frames back to free list */
+	// Reclaim completed TX frames back to free list
 	complete_tx(xsk_info);
 
 	n = xsk_info->tx_batch[nif].cnt;
@@ -576,14 +566,17 @@ int32_t afxdp_send_pkts(struct mtcp_thread_context *ctxt, int nif){
 	xsk_ring_prod__submit(&xsk_if->tx, n);
 	xsk_info->outstanding_tx += n;
 
-	/* Kick kernel if needed */
+	// Kick kernel if needed
 	if (xsk_ring_prod__needs_wakeup(&xsk_if->tx))
 		sendto(xsk_socket__fd(xsk_if->xsk), NULL, 0, MSG_DONTWAIT, NULL, 0);
 
 	xsk_info->tx_batch[nif].cnt = 0;
 	return (int32_t)n;
 }
-	
+
+// Gets ptr to read data on. Does the following:
+// 1. Iterates through rx_batch to get the addresses of UMEM frame where data is located.
+// 2. For the required index, send the UMEM address.
 uint8_t * afxdp_get_rptr(struct mtcp_thread_context *ctxt, int ifidx, int index, uint16_t *len){
 	struct xsk_socket_info *xsk_info = (struct xsk_socket_info *)ctxt->io_private_context;
 
@@ -607,12 +600,6 @@ uint8_t * afxdp_get_rptr(struct mtcp_thread_context *ctxt, int ifidx, int index,
 
 	uint8_t *p = (uint8_t *)xsk_umem__get_data(xsk_info->umem->buffer, addr);
 
-	/* Diagnostic: dump the first 14 bytes (ethernet header) so we can
-	 * confirm this is a sane frame, not a stale/garbage UMEM offset.
-	 * If you see all zeros or junk, the addr-to-pointer translation is
-	 * wrong. If you see a sane MAC + EtherType, the frame is good and
-	 * the bug is downstream (in ProcessPacket / TCP stack).
-	 * Rate-limited to first 32 packets so stderr isn't flooded. */
 	// {
 	// 	static __thread uint64_t printed = 0;
 	// 	if (printed < 32 && plen >= 14) {
@@ -632,6 +619,9 @@ uint8_t * afxdp_get_rptr(struct mtcp_thread_context *ctxt, int ifidx, int index,
 	return p;
 }
 
+// Received the packet batch wise (64). Does the following:
+// 1. Tries to regain the frames lost from fq. If not possible then returns.
+// 2. Peeks the RX ring batch wise and adds the UMEM info to rx_batch struct.
 int32_t afxdp_recv_pkts(struct mtcp_thread_context *ctxt, int ifidx){
 	struct xsk_socket_info *xsk_info = (struct xsk_socket_info *)ctxt->io_private_context;
 	struct xsk_if_socket *xsk_if;
@@ -646,14 +636,13 @@ int32_t afxdp_recv_pkts(struct mtcp_thread_context *ctxt, int ifidx){
 	if (!xsk_if->xsk)
 		return 0;
 
-	/* Recycle previous batch back into the fill queue (DPDK-style: free previous on next recv) */
+	// Recycle previous batch back into the fill queue (DPDK-style: free previous on next recv)
 	if (xsk_info->rx_batch[ifidx].cnt) {
 		uint32_t n = xsk_info->rx_batch[ifidx].cnt;
 
 		if (xsk_prod_nb_free(&xsk_info->umem->fq, n) < n)
-			return 0;	/* FQ has no room; try again next call */
+			return 0;	// FQ has no room; try again next call
 
-		/* xsk_prod_nb_free above guarantees this returns n exactly. */
 		(void)xsk_ring_prod__reserve(&xsk_info->umem->fq, n, &idx_fq);
 
 		for (i = 0; i < n; i++)
@@ -664,14 +653,7 @@ int32_t afxdp_recv_pkts(struct mtcp_thread_context *ctxt, int ifidx){
 		xsk_info->rx_batch[ifidx].cnt = 0;
 	}
 
-	/* Always service the FQ wakeup on every poll, not just after the first
-	 * batch lands. Otherwise on the very first call rx_batch.cnt == 0, we
-	 * skip the recycle block entirely, never kick the kernel, and the
-	 * kernel may sit waiting for a wakeup before it processes the FQ we
-	 * pre-filled in init_handle. With XDP_USE_NEED_WAKEUP set in
-	 * bind_flags, this is the chicken-and-egg case the user is likely
-	 * hitting: ping is redirected at XDP, but the RX descriptor never
-	 * surfaces because we never told the kernel "go". */
+	// Again kick start if needed.
 	if (xsk_ring_prod__needs_wakeup(&xsk_info->umem->fq))
 		recvfrom(xsk_socket__fd(xsk_if->xsk), NULL, 0, MSG_DONTWAIT, NULL, 0);
 
@@ -688,8 +670,6 @@ int32_t afxdp_recv_pkts(struct mtcp_thread_context *ctxt, int ifidx){
 	xsk_ring_cons__release(&xsk_if->rx, rcvd);
 	xsk_info->rx_batch[ifidx].cnt = rcvd;
 
-	/* One-shot debug print so you can confirm packets are surfacing to
-	 * userspace at all. Remove (or wrap in TRACE_DBG) once verified. */
 	// {
 	// 	static __thread uint64_t total_rcvd = 0;
 	// 	static __thread uint64_t last_print = 0;
@@ -713,6 +693,8 @@ int32_t	afxdp_select(struct mtcp_thread_context *ctxt){
 	return 0;
 }
 
+// Removes the kernel file from the NIC.
+// Cannot call with afxdp_destroy_handle as that is per core and leads to race condn.
 static void afxdp_prog_cleanup(void)
 {
 	if (!prog)
@@ -723,16 +705,11 @@ static void afxdp_prog_cleanup(void)
 		if (ifindex <= 0)
 			continue;
 		if (attached_mode[ifidx] == XDP_MODE_UNSPEC)
-			continue;       /* never attached on this iface */
+			continue;
 
 		int rc = xdp_program__detach(prog, ifindex,
 					     attached_mode[ifidx], 0);
 		if (rc) {
-			/* Surface the failure — silent detach errors are why
-			 * users end up running `ip link set dev <if> xdp off`
-			 * by hand. Common causes: program already gone (race
-			 * with another cleanup path → harmless), or netlink
-			 * busy because the netdev was torn down underneath us. */
 			char ebuf[256];
 			libxdp_strerror(rc, ebuf, sizeof(ebuf));
 			fprintf(stderr,
@@ -752,6 +729,7 @@ static void afxdp_prog_cleanup(void)
 	prog = NULL;
 }
 
+// Cleanup function. Deallocates all allocated structs. Called once per core
 void
 afxdp_destroy_handle(struct mtcp_thread_context *ctxt){
 	struct xsk_socket_info *xsk_info = (struct xsk_socket_info *)ctxt->io_private_context;

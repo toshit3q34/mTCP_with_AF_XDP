@@ -114,7 +114,7 @@ cat <<EOF
 EOF
 
 # ---------- launch epwget in its own session so we can SIGINT it cleanly ----------
-setsid ./epwget "$TARGET" "$TOTAL_REQS" -N "$N" -f "$CONF" \
+setsid ./epwget "$TARGET" "$TOTAL_REQS" -N "$N" -f "$CONF" -c 10000 \
     > "$LOG" 2>&1 < /dev/null &
 PID=$!
 echo "==> epwget PID=$PID, running for ${DURATION}s..."

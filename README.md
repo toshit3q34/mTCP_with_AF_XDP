@@ -162,7 +162,7 @@ This is used for resolving incomplete function definitions.
 
 ```bash
 # Clone the script & run
-git clone https://github.com/toshit3q34/mTCP_with_AF_XDP/blob/master/setup_linux_afxdp_env.sh
+# Copy https://github.com/toshit3q34/mTCP_with_AF_XDP/blob/master/setup_linux_afxdp_env.sh and run
 chmod +x setup_linux_afxdp_env.sh
 ./setup_linux_afxdp_env.sh
 ```
