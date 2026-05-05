@@ -137,6 +137,13 @@ struct wget_vars
 static struct thread_context *g_ctx[MAX_CPUS] = {0};
 static struct wget_stat *g_stat[MAX_CPUS] = {0};
 /*----------------------------------------------------------------------------*/
+/* Cumulative cross-thread totals. PrintStats() resets g_stat[i] every
+ * second to print "since-last-print" deltas; we accumulate into
+ * g_total_stat there so PrintFinalStats() (called after all threads
+ * have joined) can report the run-wide totals plus rates. */
+static struct wget_stat g_total_stat = {0};
+static struct timeval   g_run_start_tv;
+/*----------------------------------------------------------------------------*/
 thread_context_t 
 CreateContext(int core)
 {
@@ -514,7 +521,22 @@ PrintStats()
 		total.errors += st->errors;
 		total.timedout += st->timedout;
 
-		memset(st, 0, sizeof(struct wget_stat));		
+		/* Mirror the per-thread delta into the cumulative global totals
+		 * BEFORE the memset wipes g_stat[i]. PrintFinalStats() reads
+		 * g_total_stat after pthread_join and reports run-wide totals. */
+		g_total_stat.waits         += st->waits;
+		g_total_stat.events        += st->events;
+		g_total_stat.connects      += st->connects;
+		g_total_stat.reads         += st->reads;
+		g_total_stat.writes        += st->writes;
+		g_total_stat.completes     += st->completes;
+		g_total_stat.sum_resp_time += st->sum_resp_time;
+		if (st->max_resp_time > g_total_stat.max_resp_time)
+			g_total_stat.max_resp_time = st->max_resp_time;
+		g_total_stat.errors   += st->errors;
+		g_total_stat.timedout += st->timedout;
+
+		memset(st, 0, sizeof(struct wget_stat));
 	}
 	fprintf(stderr, "[ ALL ] connect: %7lu, read: %4lu MB, write: %4lu MB, "
 			"completes: %7lu (resp_time avg: %4lu, max: %6lu us)\n", 
@@ -525,12 +547,64 @@ PrintStats()
 	fprintf(stderr, "[ ALL ] epoll_wait: %5lu, event: %7lu, "
 			"connect: %7lu, read: %4lu MB, write: %4lu MB, "
 			"completes: %7lu (resp_time avg: %4lu, max: %6lu us), "
-			"errors: %2lu (timedout: %2lu)\n", 
-			total.waits, total.events, total.connects, 
-			total.reads / 1024 / 1024, total.writes / 1024 / 1024, 
-			total.completes, total_resp_time / core_limit, total.max_resp_time, 
+			"errors: %2lu (timedout: %2lu)\n",
+			total.waits, total.events, total.connects,
+			total.reads / 1024 / 1024, total.writes / 1024 / 1024,
+			total.completes, total_resp_time / core_limit, total.max_resp_time,
 			total.errors, total.timedout);
 #endif
+}
+/*----------------------------------------------------------------------------*/
+/* Run-wide summary printed exactly once after every wget thread has
+ * been joined. Reads g_total_stat (populated incrementally by
+ * PrintStats every second) plus a final PrintStats() call to flush
+ * any deltas accumulated since the last per-second tick. */
+static void
+PrintFinalStats(void)
+{
+	struct timeval now;
+	double elapsed;
+	uint64_t avg_resp_us;
+
+	/* Drain any per-thread stats that haven't been folded into
+	 * g_total_stat yet (the per-second printer last ran <=1s ago). */
+	PrintStats();
+
+	gettimeofday(&now, NULL);
+	elapsed = (now.tv_sec  - g_run_start_tv.tv_sec) +
+	          (now.tv_usec - g_run_start_tv.tv_usec) / 1e6;
+	if (elapsed <= 0) elapsed = 1e-9;
+
+	avg_resp_us = g_total_stat.completes
+		? g_total_stat.sum_resp_time / g_total_stat.completes
+		: 0;
+
+	fprintf(stderr, "\n");
+	fprintf(stderr, "================== epwget cumulative totals ==================\n");
+	fprintf(stderr, "Cores used                : %d\n", core_limit);
+	fprintf(stderr, "Wall-clock elapsed        : %.3f s\n", elapsed);
+	fprintf(stderr, "Connect()s issued         : %lu\n", g_total_stat.connects);
+	fprintf(stderr, "Completed (HTTP responses): %lu\n", g_total_stat.completes);
+	fprintf(stderr, "Errors                    : %lu\n", g_total_stat.errors);
+	fprintf(stderr, "Timeouts                  : %lu\n", g_total_stat.timedout);
+	fprintf(stderr, "Bytes read                : %lu  (%lu MiB)\n",
+		g_total_stat.reads, g_total_stat.reads / 1024 / 1024);
+	fprintf(stderr, "Bytes written             : %lu  (%lu KiB)\n",
+		g_total_stat.writes, g_total_stat.writes / 1024);
+	fprintf(stderr, "Epoll waits / events      : %lu / %lu\n",
+		g_total_stat.waits, g_total_stat.events);
+	fprintf(stderr, "Per-completion resp time  : avg %lu us, max %lu us\n",
+		avg_resp_us, g_total_stat.max_resp_time);
+	fprintf(stderr, "--------------------------------------------------------------\n");
+	fprintf(stderr, "Connection rate           : %.0f conn/s\n",
+		g_total_stat.connects / elapsed);
+	fprintf(stderr, "Completion rate           : %.0f compl/s\n",
+		g_total_stat.completes / elapsed);
+	fprintf(stderr, "Read throughput           : %.3f Gbps\n",
+		(g_total_stat.reads * 8.0) / elapsed / 1e9);
+	fprintf(stderr, "Write throughput          : %.3f Gbps\n",
+		(g_total_stat.writes * 8.0) / elapsed / 1e9);
+	fprintf(stderr, "==============================================================\n");
 }
 /*----------------------------------------------------------------------------*/
 void *
@@ -829,6 +903,11 @@ main(int argc, char **argv)
 
 	mtcp_register_signal(SIGINT, SignalHandler);
 
+	/* Anchor the wall-clock for PrintFinalStats(). Captured here, after
+	 * mtcp_init() but before any worker threads start, so the elapsed
+	 * window covers the entire useful run. */
+	gettimeofday(&g_run_start_tv, NULL);
+
 	flow_per_thread = total_flows / core_limit;
 	flow_remainder_cnt = total_flows % core_limit;
 	for (i = ((process_cpu == -1) ? 0 : process_cpu); i < core_limit; i++) {
@@ -852,7 +931,6 @@ main(int argc, char **argv)
 		if (process_cpu != -1)
 			break;
 	}
-	PrintStats();
 
 	for (i = ((process_cpu == -1) ? 0 : process_cpu); i < core_limit; i++) {
 		pthread_join(app_thread[i], NULL);
@@ -861,6 +939,9 @@ main(int argc, char **argv)
 		if (process_cpu != -1)
 			break;
 	}
+
+	/* Every worker has joined — emit the run-wide summary exactly once. */
+	PrintFinalStats();
 
 	mtcp_destroy();
 	return 0;
