@@ -158,6 +158,40 @@ probe_all_rte_devices(char **argv, int *argc, char *dev_name_list)
 }
 #endif /* !DISABLE_DPDK */
 /*----------------------------------------------------------------------------*/
+/*
+ * Returns 1 if `name` appears in `list` as a whole token, 0 otherwise.
+ *
+ */
+static int
+dev_name_match_in_list(const char *list, const char *name)
+{
+	size_t      nlen;
+	const char *p;
+
+	if (list == NULL || name == NULL || *name == '\0')
+		return 0;
+
+	nlen = strlen(name);
+	p = list;
+	while ((p = strstr(p, name)) != NULL) {
+		char left  = (p == list) ? '\0' : *(p - 1);
+		char right = *(p + nlen);
+
+		int left_ok  = (left  == '\0' || left  == ' ' ||
+				left  == '\t' || left  == ',');
+		int right_ok = (right == '\0' || right == ' ' ||
+				right == '\t' || right == ',' ||
+				right == ':');
+
+		if (left_ok && right_ok)
+			return 1;
+
+		/* spurious prefix/suffix match — keep searching */
+		p += nlen;
+	}
+	return 0;
+}
+/*----------------------------------------------------------------------------*/
 int
 SetNetEnv(char *dev_name_list, char *port_stat_list)
 {
@@ -680,7 +714,6 @@ SetNetEnv(char *dev_name_list, char *port_stat_list)
 #ifndef DISABLE_AFXDP
 		struct ifaddrs *ifap;
 		struct ifaddrs *iter_if;
-		char *seek;
 
 		num_queues = MIN(CONFIG.num_cores, MAX_CPUS);
 
@@ -691,11 +724,16 @@ SetNetEnv(char *dev_name_list, char *port_stat_list)
 
 		iter_if = ifap;
 		do {
+			/*
+			 * Match the interface name as a whole token in the
+			 * configured port list. Plain strstr() would let
+			 * "eno1" match inside "eno1d1"; dev_name_match_in_list
+			 * rejects such prefix collisions. set_all_inf keeps
+			 * the "all" config keyword working unchanged.
+			 */
 			if (iter_if->ifa_addr && iter_if->ifa_addr->sa_family == AF_INET &&
 			    !set_all_inf &&
-			    (seek=strstr(dev_name_list, iter_if->ifa_name)) != NULL &&
-			    /* check if the interface was not aliased */
-			    *(seek + strlen(iter_if->ifa_name)) != ':') {
+			    dev_name_match_in_list(dev_name_list, iter_if->ifa_name)) {
 				struct ifreq ifr;
 
 				/* Setting informations */
@@ -740,18 +778,27 @@ SetNetEnv(char *dev_name_list, char *port_stat_list)
 					   ifr.ifr_name, eidx,
 					   if_nametoindex(ifr.ifr_name));
 
-				/* add to attached devices */
-				for (j = 0; j < num_devices_attached; j++) {
-					if (devices_attached[j] == (int)if_nametoindex(ifr.ifr_name)) {
-						break;
+				/* add to attached devices (skip if already present —
+				 * getifaddrs can return the same iface multiple
+				 * times when it has more than one AF_INET addr) */
+				{
+					int kif = (int)if_nametoindex(ifr.ifr_name);
+					int already = 0;
+					for (j = 0; j < num_devices_attached; j++) {
+						if (devices_attached[j] == kif) {
+							already = 1;
+							break;
+						}
+					}
+					if (!already) {
+						devices_attached[num_devices_attached++] = kif;
+						fprintf(stderr,
+							"Total number of attached devices: %d\n",
+							num_devices_attached);
+						fprintf(stderr, "Interface name: %s\n",
+							iter_if->ifa_name);
 					}
 				}
-				devices_attached[num_devices_attached] = if_nametoindex(ifr.ifr_name);
-				num_devices_attached++;
-				fprintf(stderr, "Total number of attached devices: %d\n",
-					num_devices_attached);
-				fprintf(stderr, "Interface name: %s\n",
-					iter_if->ifa_name);
 			}
 			iter_if = iter_if->ifa_next;
 		} while (iter_if != NULL);
